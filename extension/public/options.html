@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>hvax ingest options</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <main>
+      <h1>hvax ingest</h1>
+      <p class="lede">
+        Every <code>&lt;img&gt;</code> (and optional CSS background) on a page is captured, including
+        nodes inserted later. Bytes are POSTed to your hvax ingest endpoint. Images without faces
+        come back 204 and are counted as “no face”.
+      </p>
+      <form id="form">
+        <label class="check"><input id="enabled" type="checkbox" /> enabled</label>
+        <label>
+          endpoint
+          <input id="endpoint" type="url" spellcheck="false" required />
+        </label>
+        <label>
+          API key (sent as <code>X-API-Key</code>, optional)
+          <input id="apiKey" type="password" autocomplete="off" />
+        </label>
+        <div class="row">
+          <label>min width <input id="minWidth" type="number" min="1" /></label>
+          <label>min height <input id="minHeight" type="number" min="1" /></label>
+          <label>max MiB <input id="maxBytesMb" type="number" min="1" /></label>
+        </div>
+        <label class="check"><input id="captureBackgrounds" type="checkbox" /> capture CSS background-image</label>
+        <label class="check"><input id="skipSvg" type="checkbox" /> skip SVG URLs</label>
+        <div class="actions">
+          <button type="submit">save</button>
+          <p id="saved"></p>
+        </div>
+      </form>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

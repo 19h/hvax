@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>hvax ingest</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <strong>hvax ingest</strong>
+      <label class="toggle">
+        <input id="enabled" type="checkbox" />
+        <span>on</span>
+      </label>
+    </header>
+    <label class="field">
+      endpoint
+      <input id="endpoint" type="url" spellcheck="false" />
+    </label>
+    <p id="status">idle</p>
+    <dl id="stats"></dl>
+    <footer>
+      <button id="save" type="button">save</button>
+      <button id="reset" type="button" class="ghost">reset stats</button>
+      <button id="options" type="button" class="ghost">options</button>
+    </footer>
+    <script src="popup.js"></script>
+  </body>
+</html>

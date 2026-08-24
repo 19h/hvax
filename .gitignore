@@ -1,0 +1,9 @@
+/build/
+/data/
+/models/*.onnx
+compile_commands.json
+.cache/
+*.tmp
+hvax.lock
+extension/node_modules/
+extension/dist/
