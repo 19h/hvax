@@ -9,6 +9,19 @@ const MAX_PARALLEL = 2;
 let active = 0;
 const waiters: Array<() => void> = [];
 
+async function injectIntoOpenTabs(): Promise<void> {
+  const tabs = await chrome.tabs.query({});
+  await Promise.allSettled(
+    tabs.map(async (tab) => {
+      if (tab.id === undefined) return;
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id, allFrames: true },
+        files: ["content.js"],
+      });
+    }),
+  );
+}
+
 async function fetchServerStats(settings: Settings): Promise<ServerStats> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (settings.apiKey) headers["X-API-Key"] = settings.apiKey;
@@ -166,4 +179,11 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "sync" && changes.enabled) {
     void chrome.action.setBadgeText({ text: changes.enabled.newValue ? "" : "off" });
   }
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  // Declarative content scripts only run on future navigations. Reinject the
+  // freshly installed version into existing tabs so an extension reload does
+  // not leave them permanently attached to an invalidated runtime context.
+  void injectIntoOpenTabs().catch(() => undefined);
 });

@@ -3,6 +3,42 @@ import { DEFAULT_SETTINGS, type IngestBytesMessage, type IngestUrlMessage, type 
 const seen = new Set<string>();
 let settings: Settings = { ...DEFAULT_SETTINGS };
 const observedRoots = new WeakSet<Node>();
+const observers = new Set<MutationObserver>();
+let alive = true;
+
+type ContentInstance = { stop: () => void };
+const instanceKey = "__hvaxContentInstance";
+const contentGlobal = globalThis as typeof globalThis & { [instanceKey]?: ContentInstance };
+
+function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>, area: string): void {
+  if (!alive || area !== "sync") return;
+  const was = settings.enabled;
+  settings = { ...settings, ...Object.fromEntries(Object.entries(changes).map(([k, v]) => [k, v.newValue])) };
+  if (!was && settings.enabled) walk(document);
+}
+
+function onImageLoad(ev: Event): void {
+  if (alive && ev.target instanceof HTMLImageElement) considerImg(ev.target);
+}
+
+function shutdown(): void {
+  if (!alive) return;
+  alive = false;
+  observers.forEach((observer) => observer.disconnect());
+  observers.clear();
+  try {
+    chrome.storage?.onChanged.removeListener(onStorageChanged);
+  } catch {
+    // A reloaded extension invalidates this API before the old page world is
+    // torn down. The DOM cleanup above must still complete without an uncaught
+    // exception.
+  }
+  document.removeEventListener("load", onImageLoad, true);
+  if (contentGlobal[instanceKey]?.stop === shutdown) delete contentGlobal[instanceKey];
+}
+
+contentGlobal[instanceKey]?.stop();
+contentGlobal[instanceKey] = { stop: shutdown };
 
 function normalizeUrl(raw: string): string {
   const t = raw.trim().replace(/^url\((['"]?)(.*)\1\)$/, "$2");
@@ -32,6 +68,23 @@ function sameOrigin(url: string): boolean {
   }
 }
 
+async function sendMessage(msg: IngestUrlMessage | IngestBytesMessage): Promise<boolean> {
+  if (!alive) return false;
+  try {
+    if (!chrome.runtime?.id) {
+      shutdown();
+      return false;
+    }
+    await chrome.runtime.sendMessage(msg);
+    return true;
+  } catch (err) {
+    if (!chrome.runtime?.id || (err instanceof Error && err.message.includes("Extension context invalidated"))) {
+      shutdown();
+    }
+    return false;
+  }
+}
+
 function sendUrl(url: string, width: number, height: number): void {
   const msg: IngestUrlMessage = {
     type: "ingest-url",
@@ -40,40 +93,82 @@ function sendUrl(url: string, width: number, height: number): void {
     width,
     height,
   };
-  void chrome.runtime.sendMessage(msg).catch(() => undefined);
+  void sendMessage(msg);
 }
 
-async function sendBytes(url: string, width: number, height: number): Promise<void> {
+async function transcodeBlob(blob: Blob, image?: HTMLImageElement): Promise<Blob> {
+  let bitmap: ImageBitmap | undefined;
+  let width = image?.naturalWidth ?? 0;
+  let height = image?.naturalHeight ?? 0;
+  if (!image || width === 0 || height === 0) {
+    bitmap = await createImageBitmap(blob);
+    width = bitmap.width;
+    height = bitmap.height;
+  }
+
+  // Stay below hvaxd's default 40-megapixel decode limit and common canvas limits.
+  const maxPixels = 39_000_000;
+  const scale = Math.min(1, Math.sqrt(maxPixels / Math.max(1, width * height)), 16_384 / Math.max(width, height));
+  const outWidth = Math.max(1, Math.floor(width * scale));
+  const outHeight = Math.max(1, Math.floor(height * scale));
+  const canvas = new OffscreenCanvas(outWidth, outHeight);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap?.close();
+    throw new Error("2D canvas unavailable");
+  }
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, outWidth, outHeight);
+  if (image) ctx.drawImage(image, 0, 0, outWidth, outHeight);
+  else if (bitmap) ctx.drawImage(bitmap, 0, 0, outWidth, outHeight);
+  bitmap?.close();
+  return canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
+}
+
+async function sendBytes(url: string, width: number, height: number, image?: HTMLImageElement): Promise<void> {
+  let res: Response;
   try {
-    const res = await fetch(url, { credentials: "include", cache: "force-cache" });
+    res = await fetch(url, { credentials: "include", cache: "force-cache" });
     if (!res.ok) {
       sendUrl(url, width, height);
       return;
     }
-    const mime = res.headers.get("content-type") || "application/octet-stream";
-    const buf = await res.arrayBuffer();
-    if (buf.byteLength === 0 || buf.byteLength > settings.maxBytes) return;
-    const msg: IngestBytesMessage = {
-      type: "ingest-bytes",
-      sourceUrl: url,
-      pageUrl: location.href,
-      mime: mime.split(";")[0]!.trim(),
-      width,
-      height,
-      bytes: buf,
-    };
-    void chrome.runtime.sendMessage(msg).catch(() => undefined);
   } catch {
     sendUrl(url, width, height);
+    return;
   }
+
+  let body = await res.blob();
+  if (url.startsWith("blob:")) {
+    try {
+      // Chrome may display AVIF, animated WebP, SVG, or other blob-backed
+      // formats that the server's OpenCV build cannot decode. Normalize the
+      // browser-decoded pixels to a regular JPEG before sending them.
+      body = await transcodeBlob(body, image);
+    } catch {
+      // Preserve the old behavior as a fallback if this browser cannot render
+      // the blob through an OffscreenCanvas.
+    }
+  }
+  if (body.size === 0 || body.size > settings.maxBytes) return;
+  const msg: IngestBytesMessage = {
+    type: "ingest-bytes",
+    sourceUrl: url,
+    pageUrl: location.href,
+    mime: body.type || "application/octet-stream",
+    width,
+    height,
+    bytes: await body.arrayBuffer(),
+  };
+  await sendMessage(msg);
 }
 
-function dispatch(url: string, width: number, height: number): void {
+function dispatch(url: string, width: number, height: number, image?: HTMLImageElement): void {
   if (already(url)) return;
   if (settings.skipSvg && looksSvg(url)) return;
   if (width > 0 && height > 0 && (width < settings.minWidth || height < settings.minHeight)) return;
   if (url.startsWith("blob:") || url.startsWith("data:") || sameOrigin(url)) {
-    void sendBytes(url, width, height);
+    void sendBytes(url, width, height, image);
   } else {
     sendUrl(url, width, height);
   }
@@ -87,7 +182,7 @@ function considerImg(img: HTMLImageElement): void {
   }
   const url = normalizeUrl(img.currentSrc || img.src);
   if (!url) return;
-  dispatch(url, img.naturalWidth, img.naturalHeight);
+  dispatch(url, img.naturalWidth, img.naturalHeight, img);
 }
 
 function considerSrcset(el: HTMLSourceElement | HTMLImageElement): void {
@@ -108,7 +203,7 @@ function considerSrcset(el: HTMLSourceElement | HTMLImageElement): void {
       best = u;
     }
   }
-  if (best) dispatch(best, bestW, bestW);
+  if (best) dispatch(best, bestW, bestW, el instanceof HTMLImageElement ? el : undefined);
 }
 
 const BG_URL = /url\(\s*(['"]?)(.*?)\1\s*\)/g;
@@ -146,10 +241,10 @@ function walk(root: ParentNode): void {
 }
 
 function observe(root: Node): void {
-  if (observedRoots.has(root)) return;
+  if (!alive || observedRoots.has(root)) return;
   observedRoots.add(root);
   const mo = new MutationObserver((mutations) => {
-    if (!settings.enabled) return;
+    if (!alive || !settings.enabled) return;
     for (const m of mutations) {
       if (m.type === "attributes" && m.target instanceof HTMLImageElement) {
         considerImg(m.target);
@@ -172,6 +267,7 @@ function observe(root: Node): void {
       }
     }
   });
+  observers.add(mo);
   mo.observe(root, {
     childList: true,
     subtree: true,
@@ -181,21 +277,16 @@ function observe(root: Node): void {
 }
 
 async function boot(): Promise<void> {
-  settings = await chrome.storage.sync.get(DEFAULT_SETTINGS).then((s) => ({ ...DEFAULT_SETTINGS, ...s }));
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "sync") return;
-    const was = settings.enabled;
-    settings = { ...settings, ...Object.fromEntries(Object.entries(changes).map(([k, v]) => [k, v.newValue])) };
-    if (!was && settings.enabled) walk(document);
-  });
+  try {
+    settings = await chrome.storage.sync.get(DEFAULT_SETTINGS).then((s) => ({ ...DEFAULT_SETTINGS, ...s }));
+  } catch {
+    shutdown();
+    return;
+  }
+  if (!alive) return;
+  chrome.storage.onChanged.addListener(onStorageChanged);
   observe(document.documentElement);
-  document.addEventListener(
-    "load",
-    (ev) => {
-      if (ev.target instanceof HTMLImageElement) considerImg(ev.target);
-    },
-    true,
-  );
+  document.addEventListener("load", onImageLoad, true);
   if (settings.enabled) walk(document);
 }
 

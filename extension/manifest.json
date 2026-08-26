@@ -30,6 +30,6 @@
       "match_about_blank": true
     }
   ],
-  "permissions": ["storage"],
+  "permissions": ["storage", "scripting"],
   "host_permissions": ["<all_urls>"]
 }

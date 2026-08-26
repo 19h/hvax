@@ -32,7 +32,15 @@ Popup or Options:
 - `load` events on images that were incomplete at scan time
 - CSS `background-image` URLs when enabled
 
-Same-origin, `blob:`, and `data:` images are read in the content script (page cookies apply) and forwarded as bytes. Cross-origin URLs are fetched by the service worker.
+Same-origin and `data:` images are read in the content script (page cookies
+apply) and forwarded as bytes. `blob:` images are decoded by Chrome and
+normalized to JPEG first, so browser-supported formats also work when the
+server's OpenCV build cannot decode the original container. Cross-origin URLs
+are fetched by the service worker.
+
+Reloading or updating the extension automatically replaces its content script
+in already-open web tabs. Unsupported browser-internal pages still require a
+normal navigation before the extension can run there.
 
 hvax 204 (no face) is treated as success: the image was seen and ignored by the gallery.
 
