@@ -1,10 +1,13 @@
 #include "hvax/http/server.hpp"
 
+#include "hvax/http/landing_html.hpp"
 #include "hvax/util/hex.hpp"
 
 #include <cstring>
 #include <fstream>
 #include <optional>
+#include <sstream>
+#include <string>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -113,6 +116,47 @@ void run_server(Engine& engine) {
     res.set_content("{\"error\":\"unauthorized\"}", "application/json");
     return false;
   };
+
+  auto wants_html = [](const httplib::Request& req) {
+    const auto acc = req.get_header_value("Accept");
+    if (acc.find("text/html") != std::string::npos) return true;
+    const auto ua = req.get_header_value("User-Agent");
+    return ua.find("Mozilla") != std::string::npos;
+  };
+
+  auto landing_plain = [&](const httplib::Request& req) {
+    const auto& g = engine.gallery();
+    std::string host = req.get_header_value("Host");
+    if (host.empty()) host = cfg.bind + ":" + std::to_string(cfg.port);
+    std::ostringstream o;
+    o << "hvax — self-hosted cpu face gallery\n"
+      << "status    online\n"
+      << "images    " << g.live_images() << "\n"
+      << "faces     " << g.live_faces() << "\n"
+      << "embeds    " << g.embedding_rows() << "\n"
+      << "index     " << (g.hnsw_active() ? "hnsw" : "exact") << "\n"
+      << "\n"
+      << "GET   /health\n"
+      << "GET   /metrics\n"
+      << "GET   /v1/stats\n"
+      << "POST  /v1/ingest\n"
+      << "POST  /v1/query/image\n"
+      << "POST  /v1/query/embedding\n"
+      << "\n"
+      << "curl --data-binary @face.jpg \\\n"
+      << "     -H 'Content-Type: image/jpeg' \\\n"
+      << "     http://" << host << "/v1/ingest\n";
+    return o.str();
+  };
+
+  svr.Get("/", [&](const httplib::Request& req, httplib::Response& res) {
+    res.set_header("Cache-Control", "no-cache");
+    if (wants_html(req)) {
+      res.set_content(kLandingHtml, "text/html; charset=utf-8");
+      return;
+    }
+    res.set_content(landing_plain(req), "text/plain; charset=utf-8");
+  });
 
   svr.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
     nlohmann::json j = {{"status", "ok"},

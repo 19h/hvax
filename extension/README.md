@@ -16,7 +16,7 @@ Load unpacked in Chrome: `chrome://extensions` → Developer mode → **Load unp
 
 Popup or Options:
 
-- **endpoint** — default `http://127.0.0.1:8080/v1/ingest` (`hvaxd` must be running, bind not limited to localhost if you ingest from another machine)
+- **server URL** — default `http://127.0.0.1:8080`; a base path or legacy full `/v1/ingest` URL also works (`hvaxd` must be running, bind not limited to localhost if you ingest from another machine)
 - **API key** — sent as `X-API-Key` if you started `hvaxd --api-key`
 - min width/height — skip favicons and tracking pixels (default 64)
 - capture CSS backgrounds — off if you only want `<img>`
@@ -35,3 +35,7 @@ Popup or Options:
 Same-origin, `blob:`, and `data:` images are read in the content script (page cookies apply) and forwarded as bytes. Cross-origin URLs are fetched by the service worker.
 
 hvax 204 (no face) is treated as success: the image was seen and ignored by the gallery.
+
+The popup reads authoritative image, face, embedding-row, and search-index stats
+from the server's `/v1/stats` endpoint. Transfer and error counters remain local
+to the current browser session.

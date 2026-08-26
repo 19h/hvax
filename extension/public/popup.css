@@ -62,11 +62,20 @@ input[type="password"] {
 
 #status.err { color: #e07070; }
 
+h2 {
+  margin: 8px 0 3px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 dl {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 2px 12px;
-  margin: 0 0 10px;
+  margin: 0 0 8px;
 }
 
 dt { color: var(--muted); }

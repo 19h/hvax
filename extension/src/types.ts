@@ -11,7 +11,7 @@ export type Settings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   enabled: true,
-  endpoint: "http://127.0.0.1:8080/v1/ingest",
+  endpoint: "http://127.0.0.1:8080",
   apiKey: "",
   minWidth: 64,
   minHeight: 64,
@@ -68,4 +68,13 @@ export type ExtMessage = IngestUrlMessage | IngestBytesMessage | GetStatusMessag
 export type StatusResponse = {
   settings: Settings;
   stats: Stats;
+  serverStats: ServerStats | null;
+  serverError: string;
+};
+
+export type ServerStats = {
+  faces: number;
+  images: number;
+  embedding_rows: number;
+  hnsw: boolean;
 };

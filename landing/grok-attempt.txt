@@ -1,0 +1,521 @@
+design an ascii-art landing page for a service called hvax running on https://hv.ax<a href="https://github.com/19h/hvax" target="_blank" rel="noopener noreferrer nofollow"></a>text╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║      ██╗  ██╗██╗   ██╗ █████╗ ██╗  ██╗                               ║
+║      ██║  ██║██║   ██║██╔══██╗╚██╗██╔╝                               ║
+║      ███████║██║   ██║███████║ ╚███╔╝                                ║
+║      ██╔══██║╚██╗ ██╔╝██╔══██║ ██╔██╗                                ║
+║      ██║  ██║ ╚████╔╝ ██║  ██║██╔╝ ██╗                               ║
+║      ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝                               ║
+║                                                                      ║
+║               self-hosted · cpu-only · face gallery                  ║
+║                                                                      ║
+║            https://hv.ax          github.com/19h/hvax                ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║   Ingest. Detect. Embed. Search.                                     ║
+║                                                                      ║
+║   Pure C++ face similarity search. InsightFace models via ONNX.      ║
+║   Memory-mapped storage. No Python. No database. No cloud.           ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║   FEATURES                                                           ║
+║                                                                      ║
+║   ▸ SCRFD-10G detection + ArcFace R50 (512-d) embeddings             ║
+║   ▸ Exact cosine (<100k) or USearch HNSW + float32 rerank            ║
+║   ▸ Memory-mapped images, metadata & embeddings on disk              ║
+║   ▸ SHA-256 + optional perceptual (pHash/dHash) deduplication        ║
+║   ▸ HTTP API · Prometheus metrics · /health                          ║
+║   ▸ Optional Chrome extension for browser-based ingest               ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║   QUICK START                                                        ║
+║                                                                      ║
+║   $ ./scripts/download_models.sh                                     ║
+║   $ cmake --preset rel && cmake --build build -j                     ║
+║   $ ./build/hvaxd --data-dir ./data --models-dir ./models            ║
+║                                                                      ║
+║   POST /v1/ingest           add image                                ║
+║   POST /v1/query/image      search by photo                          ║
+║   POST /v1/query/embedding  search by vector                         ║
+║                                                                      ║
+╠══════════════════════════════════════════════════════════════════════╣
+║                                                                      ║
+║          your faces · your hardware · privacy first                  ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝this is really cool but I meant as a landing page of a running instance, i.e. "/" root path (which currently returns 404!)
+ 
+and ideally I want this to have great colors, but it should look rawHere’s a design specifically for the root path / of a running hvax instance.
+It is pure HTML (self-contained, no external assets), dark, monospace, and uses neon terminal colors while still feeling raw.
+HTML<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="hvax — self-hosted cpu-only face gallery">
+<title>hvax</title>
+<style>
+  :root {
+    --bg: #050505;
+    --fg: #b0b0b0;
+    --cyan: #00e8ff;
+    --green: #39ff14;
+    --magenta: #ff2d95;
+    --dim: #444;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.4;
+    padding: 2.2rem 1.25rem 3rem;
+    min-height: 100vh;
+  }
+  pre {
+    margin: 0 auto;
+    max-width: 68ch;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .c { color: var(--cyan); }
+  .g { color: var(--green); }
+  .m { color: var(--magenta); }
+  .d { color: var(--dim); }
+  .w { color: #e0e0e0; }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<pre>
+<span class="c">      ██╗  ██╗██╗   ██╗ █████╗ ██╗  ██╗</span>
+<span class="c">      ██║  ██║██║   ██║██╔══██╗╚██╗██╔╝</span>
+<span class="m">      ███████║██║   ██║███████║ ╚███╔╝ </span>
+<span class="c">      ██╔══██║╚██╗ ██╔╝██╔══██║ ██╔██╗ </span>
+<span class="c">      ██║  ██║ ╚████╔╝ ██║  ██║██╔╝ ██╗</span>
+<span class="c">      ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝</span>
+
+         <span class="w">self-hosted · cpu-only · face gallery</span>
+
+              <span class="g">● ONLINE</span>  <span class="d">· ready</span>
+
+
+<span class="d">────────────────────────────────────────────────</span>
+
+  <span class="w">Ingest. Detect. Embed. Search.</span>
+  Pure C++ · InsightFace · ONNX · mmap
+  Your faces never leave this machine.
+
+
+<span class="d">────────────────────────────────────────────────</span>
+
+  <span class="m">GALLERY</span>
+
+  images      <span class="w">0</span>
+  faces       <span class="w">0</span>
+  embeddings  <span class="w">0</span>
+  index       <span class="d">exact</span>
+
+
+<span class="d">────────────────────────────────────────────────</span>
+
+  <span class="m">ENDPOINTS</span>
+
+  <span class="c">GET</span>  /health                 status + counts
+  <span class="c">GET</span>  /metrics                prometheus
+  <span class="c">GET</span>  /v1/stats               full stats
+
+  <span class="c">POST</span> /v1/ingest              ingest image
+  <span class="c">POST</span> /v1/query/image         search by photo
+  <span class="c">POST</span> /v1/query/embedding     search by vector
+
+
+<span class="d">────────────────────────────────────────────────</span>
+
+  <span class="m">TRY</span>
+
+  curl --data-binary @face.jpg \
+       -H 'Content-Type: image/jpeg' \
+       http://this-host/v1/ingest
+
+
+<span class="d">────────────────────────────────────────────────</span>
+
+  <span class="d">privacy first · no cloud · single binary</span>
+
+  <a href="https://github.com/19h/hvax">github.com/19h/hvax</a>
+</pre>
+</body>
+</html>
+Why this version
+
+Raw: pure black background, monospace only, no cards, no buttons, no frameworks.
+Great colors: electric cyan logo + magenta accent line + neon green ● ONLINE.
+Live-instance feel: status indicator + GALLERY block (the numbers are placeholders — in the real C++ handler you can replace them with live values from engine.gallery()).
+Easy to serve from cpp-httplib:
+
+C++svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
+  res.set_content(LANDING_HTML, "text/html; charset=utf-8");
+});
+Would you like a version with a full double-line box border, an ANSI text/plain fallback for curl, or the stats made ready for string replacement?page doesn't seem properly centered also overflows on mobile and the logo is misaligned vs sloganHTML<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="hvax — self-hosted cpu-only face gallery">
+<title>hvax</title>
+<style>
+  :root {
+    --bg: #050505;
+    --fg: #b0b0b0;
+    --cyan: #00e8ff;
+    --green: #39ff14;
+    --magenta: #ff2d95;
+    --dim: #444;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+  }
+  body {
+    color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.4;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 2.5rem 1rem 3rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  pre {
+    margin: 0;
+    max-width: min(52ch, 100%);
+    width: 100%;
+    white-space: pre;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .c { color: var(--cyan); }
+  .g { color: var(--green); }
+  .m { color: var(--magenta); }
+  .d { color: var(--dim); }
+  .w { color: #e0e0e0; }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  @media (max-width: 560px) {
+    body {
+      font-size: 11.5px;
+      padding: 1.4rem 0.7rem 2rem;
+    }
+  }
+  @media (max-width: 400px) {
+    body {
+      font-size: 10.5px;
+      padding: 1.1rem 0.5rem 1.5rem;
+    }
+  }
+</style>
+</head>
+<body>
+<pre>
+<span class="c">    ██╗  ██╗██╗   ██╗ █████╗ ██╗  ██╗</span>
+<span class="c">    ██║  ██║██║   ██║██╔══██╗╚██╗██╔╝</span>
+<span class="m">    ███████║██║   ██║███████║ ╚███╔╝ </span>
+<span class="c">    ██╔══██║╚██╗ ██╔╝██╔══██║ ██╔██╗ </span>
+<span class="c">    ██║  ██║ ╚████╔╝ ██║  ██║██╔╝ ██╗</span>
+<span class="c">    ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝</span>
+
+  <span class="w">self-hosted · cpu-only · face gallery</span>
+
+         <span class="g">● ONLINE</span>  <span class="d">· ready</span>
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="w">Ingest. Detect. Embed. Search.</span>
+Pure C++ · InsightFace · ONNX · mmap
+Your faces never leave this machine.
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">GALLERY</span>
+
+images      <span class="w">0</span>
+faces       <span class="w">0</span>
+embeddings  <span class="w">0</span>
+index       <span class="d">exact</span>
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">ENDPOINTS</span>
+
+<span class="c">GET</span>  /health              status + counts
+<span class="c">GET</span>  /metrics             prometheus
+<span class="c">GET</span>  /v1/stats            full stats
+
+<span class="c">POST</span> /v1/ingest           ingest image
+<span class="c">POST</span> /v1/query/image      search by photo
+<span class="c">POST</span> /v1/query/embedding  search by vector
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">TRY</span>
+
+curl --data-binary @face.jpg \
+     -H 'Content-Type: image/jpeg' \
+     http://this-host/v1/ingest
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="d">privacy first · no cloud · single binary</span>
+
+<a href="https://github.com/19h/hvax">github.com/19h/hvax</a>
+</pre>
+</body>
+</html>
+Fixes applied
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+IssueFixNot centeredbody is now a flex container with justify-content: centerOverflows on mobileTwo media queries that progressively reduce font-size + padding; max-width: min(52ch, 100%) + touch scrollingLogo vs slogan misalignedLogo padded with 4 spaces, slogan with 2 spaces so their visual centers line up (logo 33ch, slogan 37ch)
+This should now sit properly centered on desktop and scale cleanly down to phones without ugly overflow.the spacing between the sections is way too funky also it seems there are three separate slogans / sell lines .... keep gallery stats (rename gallery to something else), the endpoints, the try section and introHTML<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="hvax — self-hosted cpu-only face gallery">
+<title>hvax</title>
+<style>
+  :root {
+    --bg: #050505;
+    --fg: #b0b0b0;
+    --cyan: #00e8ff;
+    --green: #39ff14;
+    --magenta: #ff2d95;
+    --dim: #555;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+  }
+  body {
+    color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
+    font-size: 14px;
+    line-height: 1.45;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    min-height: 100vh;
+    padding: 2.5rem 1rem 3rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  pre {
+    margin: 0;
+    max-width: min(52ch, 100%);
+    width: 100%;
+    white-space: pre;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .c { color: var(--cyan); }
+  .g { color: var(--green); }
+  .m { color: var(--magenta); }
+  .d { color: var(--dim); }
+  .w { color: #e0e0e0; }
+  a { color: var(--cyan); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  @media (max-width: 560px) {
+    body { font-size: 11.5px; padding: 1.4rem 0.7rem 2rem; }
+  }
+  @media (max-width: 400px) {
+    body { font-size: 10.5px; padding: 1.1rem 0.5rem 1.5rem; }
+  }
+</style>
+</head>
+<body>
+<pre>
+<span class="c">    ██╗  ██╗██╗   ██╗ █████╗ ██╗  ██╗</span>
+<span class="c">    ██║  ██║██║   ██║██╔══██╗╚██╗██╔╝</span>
+<span class="m">    ███████║██║   ██║███████║ ╚███╔╝ </span>
+<span class="c">    ██╔══██║╚██╗ ██╔╝██╔══██║ ██╔██╗ </span>
+<span class="c">    ██║  ██║ ╚████╔╝ ██║  ██║██╔╝ ██╗</span>
+<span class="c">    ╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝</span>
+
+  <span class="w">self-hosted · cpu-only · face gallery</span>
+
+         <span class="g">● ONLINE</span>
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="w">Ingest images. Detect faces. Search by similarity.</span>
+Pure C++ · InsightFace · ONNX Runtime · mmap
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">STATS</span>
+
+images      <span class="w">0</span>
+faces       <span class="w">0</span>
+embeddings  <span class="w">0</span>
+index       <span class="d">exact</span>
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">ENDPOINTS</span>
+
+<span class="c">GET</span>  /health              status + counts
+<span class="c">GET</span>  /metrics             prometheus
+<span class="c">GET</span>  /v1/stats            full stats
+
+<span class="c">POST</span> /v1/ingest           ingest image
+<span class="c">POST</span> /v1/query/image      search by photo
+<span class="c">POST</span> /v1/query/embedding  search by vector
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="m">TRY</span>
+
+curl --data-binary @face.jpg \
+     -H 'Content-Type: image/jpeg' \
+     http://this-host/v1/ingest
+
+
+<span class="d">──────────────────────────────────────</span>
+
+<span class="d">privacy first · no cloud</span>
+<a href="https://github.com/19h/hvax">github.com/19h/hvax</a>
+</pre>
+</body>
+</html>
+What changed
+
+Removed extra slogans — only one tagline under the logo + one short intro block
+Renamed GALLERY → STATS
+Uniform spacing — single blank line around every separator for even rhythm
+Kept exactly what you asked for: intro, stats, endpoints, TRY section
+looks like shit now, spacing is huge, that unneccessary second section overflows, the footer is useless af, can't you come up with something a lot cooler? bruhHTML<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hvax</title>
+<style>
+  :root {
+    --bg: #050505;
+    --fg: #b8b8b8;
+    --c: #00e8ff;
+    --g: #39ff14;
+    --m: #ff2d95;
+    --d: #3a3a3a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.3;
+    display: flex;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 1.8rem 0.75rem;
+    -webkit-text-size-adjust: 100%;
+  }
+  pre {
+    max-width: min(46ch, 100%);
+    width: 100%;
+    white-space: pre;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .c { color: var(--c); }
+  .g { color: var(--g); }
+  .m { color: var(--m); }
+  .d { color: var(--d); }
+  .w { color: #e8e8e8; }
+  a { color: var(--c); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  @media (max-width: 480px) {
+    body { font-size: 11px; padding: 1.1rem 0.5rem; }
+  }
+</style>
+</head>
+<body>
+<pre>
+<span class="c">██╗  ██╗██╗   ██╗ █████╗ ██╗  ██╗</span>
+<span class="c">██║  ██║██║   ██║██╔══██╗╚██╗██╔╝</span>
+<span class="m">███████║██║   ██║███████║ ╚███╔╝ </span>
+<span class="c">██╔══██║╚██╗ ██╔╝██╔══██║ ██╔██╗ </span>
+<span class="c">██║  ██║ ╚████╔╝ ██║  ██║██╔╝ ██╗</span>
+<span class="c">╚═╝  ╚═╝  ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝</span>
+<span class="w">self-hosted face gallery</span>          <span class="g">● ONLINE</span>
+
+<span class="d">──────────────────────────────────</span>
+<span class="m">STATS</span>  images <span class="w">0</span> · faces <span class="w">0</span> · embeds <span class="w">0</span>
+
+<span class="d">──────────────────────────────────</span>
+<span class="m">ENDPOINTS</span>
+<span class="c">GET</span>  /health          <span class="c">POST</span> /v1/ingest
+<span class="c">GET</span>  /metrics         <span class="c">POST</span> /v1/query/image
+<span class="c">GET</span>  /v1/stats        <span class="c">POST</span> /v1/query/embedding
+
+<span class="d">──────────────────────────────────</span>
+<span class="m">TRY</span>
+curl --data-binary @face.jpg \
+     -H 'Content-Type: image/jpeg' \
+     /v1/ingest
+
+<span class="d">──────────────────────────────────</span>
+<a href="https://github.com/19h/hvax">github.com/19h/hvax</a>
+</pre>
+</body>
+</html>
+What changed
+
+Much denser — almost no wasted vertical space
+Killed the weak intro section that was overflowing
+One-line STATS
+Two-column endpoints for compactness
+Footer reduced to just the GitHub link
+Tighter overall height and stronger neon contrast
+Still centered + mobile-safe
+
+This should feel a lot cooler and more like a live terminal panel.

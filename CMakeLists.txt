@@ -37,6 +37,33 @@ if(NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
   message(FATAL_ERROR "ONNX Runtime not found at ${ORT_ROOT}. Extract the official linux-x64 CPU tarball there.")
 endif()
 
+set(HVAX_LANDING_HTML "${CMAKE_SOURCE_DIR}/landing/index.html")
+set(HVAX_LANDING_HPP "${CMAKE_BINARY_DIR}/generated/hvax/http/landing_html.hpp")
+set(HVAX_EMBED_SCRIPT "${CMAKE_SOURCE_DIR}/cmake/embed_text.cmake")
+
+execute_process(
+  COMMAND ${CMAKE_COMMAND}
+    -DINPUT=${HVAX_LANDING_HTML}
+    -DOUTPUT=${HVAX_LANDING_HPP}
+    -DVAR=kLandingHtml
+    -P ${HVAX_EMBED_SCRIPT}
+  RESULT_VARIABLE HVAX_EMBED_RC
+)
+if(NOT HVAX_EMBED_RC EQUAL 0)
+  message(FATAL_ERROR "failed to embed landing/index.html")
+endif()
+
+add_custom_command(
+  OUTPUT ${HVAX_LANDING_HPP}
+  COMMAND ${CMAKE_COMMAND}
+    -DINPUT=${HVAX_LANDING_HTML}
+    -DOUTPUT=${HVAX_LANDING_HPP}
+    -DVAR=kLandingHtml
+    -P ${HVAX_EMBED_SCRIPT}
+  DEPENDS ${HVAX_LANDING_HTML} ${HVAX_EMBED_SCRIPT}
+  COMMENT "Embedding landing/index.html"
+)
+
 set(HVAX_SOURCES
   src/config.cpp
   src/infer/ort.cpp
@@ -61,7 +88,11 @@ target_include_directories(hvax_lib
     ${NLOHMANN_JSON_INCLUDE}
     ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_SOURCE_DIR}/third_party/usearch
+    ${CMAKE_BINARY_DIR}/generated
 )
+set_source_files_properties(src/http/server.cpp PROPERTIES OBJECT_DEPENDS ${HVAX_LANDING_HPP})
+add_custom_target(hvax_embed_landing DEPENDS ${HVAX_LANDING_HPP})
+add_dependencies(hvax_lib hvax_embed_landing)
 target_compile_definitions(hvax_lib PUBLIC
   USEARCH_USE_SIMSIMD=0
   USEARCH_USE_FP16LIB=0
@@ -110,6 +141,7 @@ if(HVAX_BUILD_TESTS)
     HVAX_FIXTURE_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures"
     HVAX_MODELS_DIR="${CMAKE_SOURCE_DIR}/models"
   )
+  add_dependencies(hvax_tests hvax_embed_landing)
   set_target_properties(hvax_tests PROPERTIES
     BUILD_RPATH "${ORT_ROOT}/lib"
     INSTALL_RPATH "${ORT_ROOT}/lib"

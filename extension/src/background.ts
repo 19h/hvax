@@ -1,5 +1,6 @@
+import { resolveApiUrl } from "./api";
 import { bumpStats, loadSettings, loadStats, saveStats } from "./settings";
-import { EMPTY_STATS, type ExtMessage, type StatusResponse } from "./types";
+import { EMPTY_STATS, type ExtMessage, type ServerStats, type Settings, type StatusResponse } from "./types";
 
 const inFlight = new Set<string>();
 const posted = new Set<string>();
@@ -7,6 +8,28 @@ let chain: Promise<void> = Promise.resolve();
 const MAX_PARALLEL = 2;
 let active = 0;
 const waiters: Array<() => void> = [];
+
+async function fetchServerStats(settings: Settings): Promise<ServerStats> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (settings.apiKey) headers["X-API-Key"] = settings.apiKey;
+
+  const res = await fetch(resolveApiUrl(settings.endpoint, "/v1/stats"), {
+    headers,
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+  const stats = (await res.json()) as Partial<ServerStats>;
+  if (
+    typeof stats.faces !== "number" ||
+    typeof stats.images !== "number" ||
+    typeof stats.embedding_rows !== "number" ||
+    typeof stats.hnsw !== "boolean"
+  ) {
+    throw new Error("invalid stats response");
+  }
+  return stats as ServerStats;
+}
 
 function acquire(): Promise<void> {
   if (active < MAX_PARALLEL) {
@@ -42,7 +65,7 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
 
   let res: Response;
   try {
-    res = await fetch(settings.endpoint, { method: "POST", headers, body });
+    res = await fetch(resolveApiUrl(settings.endpoint, "/v1/ingest"), { method: "POST", headers, body });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await bumpStats({ errors: 1, lastError: msg, lastStatus: "network" });
@@ -111,8 +134,15 @@ async function ingestBytes(sourceUrl: string, mime: string, bytes: ArrayBuffer):
 
 chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) => {
   if (raw.type === "get-status") {
-    void Promise.all([loadSettings(), loadStats()]).then(([settings, stats]) => {
-      const resp: StatusResponse = { settings, stats };
+    void Promise.all([loadSettings(), loadStats()]).then(async ([settings, stats]) => {
+      let serverStats: ServerStats | null = null;
+      let serverError = "";
+      try {
+        serverStats = await fetchServerStats(settings);
+      } catch (err) {
+        serverError = err instanceof Error ? err.message : String(err);
+      }
+      const resp: StatusResponse = { settings, stats, serverStats, serverError };
       sendResponse(resp);
     });
     return true;
