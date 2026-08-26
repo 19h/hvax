@@ -605,6 +605,9 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
   });
 
   server.Get("/v1/stats", [&](const httplib::Request&, httplib::Response& response) {
+    response.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    response.set_header("Pragma", "no-cache");
+    response.set_header("Expires", "0");
     try {
       httplib::Client remote(endpoint.origin);
       configure_client(remote);

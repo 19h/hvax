@@ -40,6 +40,7 @@ nlohmann::json face_json(const FaceView& f) {
 nlohmann::json hit_json(const Hit& h) {
   return {{"face_id", h.face_id},
           {"image_id", h.image_id},
+          {"sha256", to_hex(h.sha256)},
           {"score", h.score},
           {"bbox", bbox_json(h.box)},
           {"det_score", h.det_score}};
@@ -130,6 +131,12 @@ void run_server(Engine& engine) {
     return false;
   };
 
+  auto no_store = [](httplib::Response& res) {
+    res.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    res.set_header("Pragma", "no-cache");
+    res.set_header("Expires", "0");
+  };
+
   auto wants_html = [](const httplib::Request& req) {
     const auto acc = req.get_header_value("Accept");
     if (acc.find("text/html") != std::string::npos) return true;
@@ -174,6 +181,7 @@ void run_server(Engine& engine) {
   });
 
   svr.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
+    no_store(res);
     nlohmann::json j = {{"status", "ok"},
                         {"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
@@ -182,10 +190,12 @@ void run_server(Engine& engine) {
   });
 
   svr.Get("/metrics", [&](const httplib::Request&, httplib::Response& res) {
+    no_store(res);
     res.set_content(engine.prometheus(), "text/plain; version=0.0.4");
   });
 
   svr.Get("/v1/stats", [&](const httplib::Request& req, httplib::Response& res) {
+    no_store(res);
     if (!auth(req, res)) return;
     nlohmann::json j = {{"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
@@ -396,13 +406,14 @@ void run_server(Engine& engine) {
     }
   });
 
-  svr.Get(R"(/v1/images/(\d+)/meta)", [&](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/images/([0-9a-fA-F]{64})/meta)", [&](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
-      const int64_t id = std::stoll(req.matches[1]);
-      auto im = engine.get_image(id);
+      std::array<uint8_t, 32> sha{};
+      if (!sha256_from_string(req.matches[1].str(), sha)) throw std::runtime_error("bad image hash");
+      auto im = engine.get_image(sha);
       nlohmann::json j = {{"image_id", im.image_id}, {"sha256", to_hex(im.sha256)},   {"width", im.width},
-                          {"height", im.height},     {"mime", engine.image_mime(id)}, {"nbytes", im.nbytes},
+                          {"height", im.height},     {"mime", engine.image_mime(sha)}, {"nbytes", im.nbytes},
                           {"face_ids", im.face_ids}};
       res.set_content(j.dump(), "application/json");
     } catch (...) {
@@ -411,11 +422,12 @@ void run_server(Engine& engine) {
     }
   });
 
-  svr.Get(R"(/v1/images/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/images/([0-9a-fA-F]{64}))", [&](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
-      const int64_t id = std::stoll(req.matches[1]);
-      auto path = engine.image_file(id);
+      std::array<uint8_t, 32> sha{};
+      if (!sha256_from_string(req.matches[1].str(), sha)) throw std::runtime_error("bad image hash");
+      auto path = engine.image_file(sha);
       std::ifstream in(path, std::ios::binary);
       if (!in) {
         res.status = 404;
@@ -423,18 +435,18 @@ void run_server(Engine& engine) {
         return;
       }
       std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      res.set_content(body, engine.image_mime(id));
+      res.set_content(body, engine.image_mime(sha));
     } catch (...) {
       res.status = 404;
       res.set_content("{\"error\":\"not found\"}", "application/json");
     }
   });
 
-  svr.Delete(R"(/v1/images/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+  svr.Delete(R"(/v1/images/([0-9a-fA-F]{64}))", [&](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
-      const int64_t id = std::stoll(req.matches[1]);
-      if (!engine.delete_image(id)) {
+      std::array<uint8_t, 32> sha{};
+      if (!sha256_from_string(req.matches[1].str(), sha) || !engine.delete_image(sha)) {
         res.status = 404;
         res.set_content("{\"error\":\"not found\"}", "application/json");
         return;

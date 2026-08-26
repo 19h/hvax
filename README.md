@@ -247,7 +247,7 @@ Or send JSON with one `embedding` field whose value is an array of exactly 512
 numbers.
 
 Input embeddings are L2-normalized by the server. Hits are sorted by descending
-cosine similarity and include `face_id`, `image_id`, `score`, `bbox`, and
+cosine similarity and include `face_id`, `image_id`, `sha256`, `score`, `bbox`, and
 `det_score`.
 
 For batch search, concatenate `N` raw embeddings and use
@@ -269,9 +269,19 @@ can set it explicitly with `X-Count`.
 | `POST` | `/v1/query/embedding/batch` | Search concatenated raw embeddings |
 | `GET` | `/v1/faces/:id` | Fetch face metadata |
 | `GET` | `/v1/faces/:id?include_embedding=1` | Fetch face metadata and its embedding |
-| `GET` | `/v1/images/:id/meta` | Fetch image metadata and face IDs |
-| `GET` | `/v1/images/:id` | Download the stored master image |
-| `DELETE` | `/v1/images/:id` | Delete an image and tombstone its faces |
+| `GET` | `/v1/images/:sha256/meta` | Fetch image metadata and face IDs |
+| `GET` | `/v1/images/:sha256` | Download the stored master image |
+| `DELETE` | `/v1/images/:sha256` | Delete an image and tombstone its faces |
+
+Image downloads and metadata are addressed only by the master image's full
+SHA-256. Search hits return that value in `sha256`; numeric image routes are not
+registered. This prevents trivial gallery scraping by incrementing image IDs,
+but it is not a substitute for authentication when image contents or hashes are
+already known. Set an API key if gallery access itself must be restricted.
+
+`/health`, `/metrics`, and `/v1/stats` explicitly return a
+`Cache-Control: no-store` response header; clients should not reuse gallery
+counts from an HTTP cache.
 
 Search endpoints accept these optional headers:
 

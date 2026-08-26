@@ -65,6 +65,7 @@ TEST(Gallery, InsertSearchNoSql) {
   auto hits = g.search(face.embedding.data(), 5, -1.f);
   ASSERT_FALSE(hits.empty());
   EXPECT_EQ(hits[0].image_id, id);
+  EXPECT_EQ(hits[0].sha256, sha);
   EXPECT_GT(hits[0].score, 0.99f);
   std::filesystem::remove_all(dir);
 }

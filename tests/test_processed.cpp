@@ -94,6 +94,7 @@ TEST(ProcessedIngest, StoresAndDeduplicatesWithoutLoadingModels) {
   const auto hits = engine.query_embedding(faces[0].embedding, 5, -1.f);
   ASSERT_FALSE(hits.empty());
   EXPECT_EQ(hits[0].image_id, first.image_id);
+  EXPECT_EQ(hits[0].sha256, first.sha256);
 
   const auto second = engine.ingest_processed(bytes, image, faces);
   EXPECT_EQ(second.status, hvax::IngestStatus::duplicate);

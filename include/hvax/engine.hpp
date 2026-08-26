@@ -41,11 +41,15 @@ class Engine {
                                                                      float min_score);
 
   ImageView get_image(int64_t id) const { return gallery_->image(id); }
+  ImageView get_image(const std::array<uint8_t, 32>& sha) const;
   FaceView get_face(int64_t id) const { return gallery_->face(id); }
   bool get_face_embedding(int64_t id, Embedding& e) const { return gallery_->face_embedding(id, e); }
   std::filesystem::path image_file(int64_t id) const;
+  std::filesystem::path image_file(const std::array<uint8_t, 32>& sha) const;
   std::string image_mime(int64_t id) const;
+  std::string image_mime(const std::array<uint8_t, 32>& sha) const;
   bool delete_image(int64_t id) { return gallery_->remove_image(id); }
+  bool delete_image(const std::array<uint8_t, 32>& sha);
 
   const Config& config() const { return cfg_; }
   Gallery& gallery() { return *gallery_; }

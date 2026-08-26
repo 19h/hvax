@@ -36,8 +36,10 @@ async function injectIntoOpenTabs(): Promise<void> {
 async function fetchServerStats(settings: Settings): Promise<ServerStats> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (settings.apiKey) headers["X-API-Key"] = settings.apiKey;
+  const url = new URL(resolveApiUrl(settings.endpoint, "/v1/stats"));
+  url.searchParams.set("_hvax_ts", Date.now().toString());
 
-  const res = await fetch(resolveApiUrl(settings.endpoint, "/v1/stats"), {
+  const res = await fetch(url.href, {
     headers,
     cache: "no-store",
   });

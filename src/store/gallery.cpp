@@ -418,6 +418,10 @@ std::vector<Hit> Gallery::hydrate(const std::vector<ScanHit>& rows) const {
     Hit h;
     h.face_id = static_cast<int64_t>(s.face_id);
     h.image_id = static_cast<int64_t>(s.image_id);
+    if (s.image_id == 0 || s.image_id > images_.size()) continue;
+    const auto& image = images_.at(s.image_id - 1);
+    if (!slot_live(image.flags)) continue;
+    std::memcpy(h.sha256.data(), image.sha256, h.sha256.size());
     h.row = static_cast<int64_t>(r.row);
     h.score = r.score;
     h.box = {s.x1, s.y1, s.x2, s.y2};

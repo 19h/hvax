@@ -420,7 +420,7 @@
       <button class="p" type="button" data-path="/v1/query/image"><em>POST</em><code>/v1/query/image</code></button>
       <a href="/v1/stats"><em>GET</em><code>/v1/stats</code></a>
       <button class="p" type="button" data-path="/v1/query/embedding"><em>POST</em><code>/v1/query/embedding</code></button>
-      <button type="button" data-path="/v1/images/:id"><em>GET</em><code>/v1/images/:id</code></button>
+      <button type="button" data-path="/v1/images/:sha256"><em>GET</em><code>/v1/images/:sha256</code></button>
       <button type="button" data-path="/v1/faces/:id"><em>GET</em><code>/v1/faces/:id</code></button>
     </div>
   </section>
@@ -494,10 +494,10 @@
     if (location.protocol === "file:") return;
     let j = null;
     try {
-      let r = await fetch("/v1/stats", { headers: keyHdr() });
+      let r = await fetch("/v1/stats", { headers: keyHdr(), cache: "no-store" });
       if (r.status === 401) {
         keyRow.classList.add("show", "need");
-        r = await fetch("/health");
+        r = await fetch("/health", { cache: "no-store" });
       } else {
         keyRow.classList.remove("need");
       }
@@ -505,7 +505,7 @@
     } catch (e) { j = null; }
     if (!j) {
       try {
-        const r = await fetch("/health");
+        const r = await fetch("/health", { cache: "no-store" });
         if (r.ok) j = await r.json();
       } catch (e) {}
     }
@@ -551,13 +551,13 @@
     return c.toDataURL("image/jpeg", 0.86);
   }
 
-  async function thumb(id) {
-    if (thumbs.has(id)) return thumbs.get(id);
+  async function thumb(sha256) {
+    if (thumbs.has(sha256)) return thumbs.get(sha256);
     try {
-      const r = await fetch("/v1/images/" + id, { headers: keyHdr() });
+      const r = await fetch("/v1/images/" + sha256, { headers: keyHdr() });
       if (!r.ok) return "";
       const u = URL.createObjectURL(await r.blob());
-      thumbs.set(id, u);
+      thumbs.set(sha256, u);
       return u;
     } catch (e) { return ""; }
   }
@@ -625,7 +625,7 @@
       html += "<div class='q'><div class='out-h'><span>q" + qi + " · det " + Number(q.det_score || 0).toFixed(3) + "</span><span>" + hits.length + " hits</span></div>";
       for (const h of hits) {
         const pct = Math.max(0, Math.min(100, Number(h.score) * 100));
-        html += "<div class='hit' data-img='" + esc(h.image_id) + "'><a href='/v1/images/" + esc(h.image_id) + "' target='_blank' rel='noopener'><img alt=''></a><div>"
+        html += "<div class='hit' data-img='" + esc(h.sha256) + "'><a href='/v1/images/" + esc(h.sha256) + "' target='_blank' rel='noopener'><img alt=''></a><div>"
           + "<span class='v'>" + Number(h.score).toFixed(3) + "</span>  img " + esc(h.image_id)
           + "  face " + esc(h.face_id)
           + "<div class='bar'><i style='width:" + pct + "%'></i></div></div></div>";

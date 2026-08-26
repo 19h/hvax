@@ -292,9 +292,29 @@ std::filesystem::path Engine::image_file(int64_t id) const {
   return gallery_->image_path(im.sha256);
 }
 
+ImageView Engine::get_image(const std::array<uint8_t, 32>& sha) const {
+  const auto image = gallery_->find_by_sha(sha);
+  if (!image) throw std::runtime_error("no image");
+  return gallery_->image(image->image_id);
+}
+
+std::filesystem::path Engine::image_file(const std::array<uint8_t, 32>& sha) const {
+  const auto image = get_image(sha);
+  return gallery_->image_path(image.sha256);
+}
+
 std::string Engine::image_mime(int64_t id) const {
   auto im = gallery_->image(id);
   return gallery_->mime_string(im.mime);
+}
+
+std::string Engine::image_mime(const std::array<uint8_t, 32>& sha) const {
+  return gallery_->mime_string(get_image(sha).mime);
+}
+
+bool Engine::delete_image(const std::array<uint8_t, 32>& sha) {
+  const auto image = gallery_->find_by_sha(sha);
+  return image && gallery_->remove_image(image->image_id);
 }
 
 std::string Engine::prometheus() const {
