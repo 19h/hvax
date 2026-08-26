@@ -10,14 +10,18 @@
       <h1>hvax ingest</h1>
       <p class="lede">
         Every <code>&lt;img&gt;</code> (and optional CSS background) on a page is captured, including
-        nodes inserted later. Bytes are POSTed to your hvax ingest endpoint. Images without faces
-        come back 204 and are counted as “no face”.
+        nodes inserted later. Bytes are POSTed directly to your gallery or to an optional local
+        processor. Images without faces come back 204 and are counted as “no face”.
       </p>
       <form id="form">
         <label class="check"><input id="enabled" type="checkbox" /> enabled</label>
         <label>
-          server URL or API base path
+          remote gallery URL or API base path
           <input id="endpoint" type="url" spellcheck="false" required />
+        </label>
+        <label>
+          local processor URL (optional)
+          <input id="processorEndpoint" type="url" spellcheck="false" placeholder="http://127.0.0.1:8080" />
         </label>
         <label>
           API key (sent as <code>X-API-Key</code>, optional)

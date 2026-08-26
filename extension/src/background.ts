@@ -5,9 +5,20 @@ import { EMPTY_STATS, type ExtMessage, type ServerStats, type Settings, type Sta
 const inFlight = new Set<string>();
 const posted = new Set<string>();
 let chain: Promise<void> = Promise.resolve();
+let pending = 0;
 const MAX_PARALLEL = 2;
 let active = 0;
 const waiters: Array<() => void> = [];
+
+function enqueue(task: () => Promise<void>): void {
+  pending += 1;
+  chain = chain
+    .then(task)
+    .catch(() => undefined)
+    .finally(() => {
+      pending = Math.max(0, pending - 1);
+    });
+}
 
 async function injectIntoOpenTabs(): Promise<void> {
   const tabs = await chrome.tabs.query({});
@@ -78,7 +89,8 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
 
   let res: Response;
   try {
-    res = await fetch(resolveApiUrl(settings.endpoint, "/v1/ingest"), { method: "POST", headers, body });
+    const ingestEndpoint = settings.processorEndpoint || settings.endpoint;
+    res = await fetch(resolveApiUrl(ingestEndpoint, "/v1/ingest"), { method: "POST", headers, body });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await bumpStats({ errors: 1, lastError: msg, lastStatus: "network" });
@@ -102,7 +114,11 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
       await bumpStats({ stored: 1, lastStatus: "stored", lastError: "" });
     }
   } else if (res.status === 415 || res.status === 400) {
-    await bumpStats({ errors: 1, lastStatus: String(res.status), lastError: `reject ${sourceUrl}` });
+    await bumpStats({
+      errors: 1,
+      lastStatus: String(res.status),
+      lastError: `reject ${mime || "unknown"} ${body.byteLength}B ${sourceUrl}`,
+    });
   } else {
     await bumpStats({ errors: 1, lastStatus: String(res.status), lastError: `HTTP ${res.status}` });
   }
@@ -132,13 +148,25 @@ async function ingestUrl(url: string, width: number, height: number): Promise<vo
   }
 }
 
-async function ingestBytes(sourceUrl: string, mime: string, bytes: ArrayBuffer): Promise<void> {
+function decodeBase64(data: string): ArrayBuffer {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+async function ingestBytes(sourceUrl: string, mime: string, dataBase64: string): Promise<void> {
   if (inFlight.has(sourceUrl) || posted.has(sourceUrl)) return;
   inFlight.add(sourceUrl);
   await acquire();
   try {
+    const bytes = decodeBase64(dataBase64);
     posted.add(sourceUrl);
     await postBody(bytes, mime, sourceUrl);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await bumpStats({ seen: 1, errors: 1, lastError: msg, lastStatus: "decode" });
+    await updateBadge();
   } finally {
     inFlight.delete(sourceUrl);
     release();
@@ -155,7 +183,7 @@ chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) =>
       } catch (err) {
         serverError = err instanceof Error ? err.message : String(err);
       }
-      const resp: StatusResponse = { settings, stats, serverStats, serverError };
+      const resp: StatusResponse = { settings, stats, pending, serverStats, serverError };
       sendResponse(resp);
     });
     return true;
@@ -165,11 +193,11 @@ chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) =>
     return true;
   }
   if (raw.type === "ingest-url") {
-    chain = chain.then(() => ingestUrl(raw.url, raw.width, raw.height)).catch(() => undefined);
+    enqueue(() => ingestUrl(raw.url, raw.width, raw.height));
     return false;
   }
   if (raw.type === "ingest-bytes") {
-    chain = chain.then(() => ingestBytes(raw.sourceUrl, raw.mime, raw.bytes)).catch(() => undefined);
+    enqueue(() => ingestBytes(raw.sourceUrl, raw.mime, raw.dataBase64));
     return false;
   }
   return false;

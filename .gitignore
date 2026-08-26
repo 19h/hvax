@@ -7,3 +7,4 @@ compile_commands.json
 hvax.lock
 extension/node_modules/
 extension/dist/
+third_party/onnxruntime-linux-x64-gpu-*/

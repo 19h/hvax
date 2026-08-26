@@ -1,12 +1,13 @@
 #include "hvax/infer/ort.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include <spdlog/spdlog.h>
 
 namespace hvax {
 
-OrtContext::OrtContext(int intra_threads)
+OrtContext::OrtContext(int intra_threads, bool cuda, int cuda_device)
     : env_(ORT_LOGGING_LEVEL_WARNING, "hvax"),
       cpu_mem_(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault)) {
   opts_.SetIntraOpNumThreads(intra_threads > 0 ? intra_threads : 1);
@@ -14,6 +15,20 @@ OrtContext::OrtContext(int intra_threads)
   opts_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
   opts_.EnableMemPattern();
   opts_.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+  if (cuda) {
+    const auto providers = Ort::GetAvailableProviders();
+    if (std::find(providers.begin(), providers.end(), "CUDAExecutionProvider") == providers.end()) {
+      throw std::runtime_error(
+          "CUDAExecutionProvider is unavailable; configure with -DHVAX_ORT_ROOT=<onnxruntime-gpu directory>");
+    }
+    OrtCUDAProviderOptions cuda_options;
+    cuda_options.device_id = cuda_device;
+    opts_.AppendExecutionProvider_CUDA(cuda_options);
+    cuda_enabled_ = true;
+    spdlog::info("ORT execution provider=CUDA device={}", cuda_device);
+  } else {
+    spdlog::info("ORT execution provider=CPU");
+  }
 }
 
 std::unique_ptr<Ort::Session> OrtContext::load(const std::string& path) {

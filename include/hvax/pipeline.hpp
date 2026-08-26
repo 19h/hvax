@@ -17,7 +17,8 @@ namespace hvax {
 
 class Pipeline {
  public:
-  Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh, int ort_threads);
+  Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh, int ort_threads,
+           bool cuda = false, int cuda_device = 0);
 
   std::vector<DetectedFace> run(const cv::Mat& bgr);
 

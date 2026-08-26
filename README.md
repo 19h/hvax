@@ -1,10 +1,10 @@
 # hvax
 
-hvax is a self-hosted, CPU-only face gallery for ingesting images and searching
-them by facial similarity. It runs InsightFace's `buffalo_l` detector and
-recognizer in C++, exposes a small HTTP API, and stores images, metadata, and
-512-dimensional embeddings directly on disk—no Python runtime or database
-required.
+hvax is a self-hosted face gallery for ingesting images and searching them by
+facial similarity. Its server runs on CPU, while the companion CLI can process
+images on CPU or CUDA before sending completed embeddings to the server. Images,
+metadata, and 512-dimensional embeddings are stored directly on disk—no Python
+runtime or database required.
 
 > [!IMPORTANT]
 > InsightFace distributes the `buffalo_l` model weights for **non-commercial
@@ -22,6 +22,8 @@ required.
 - SHA-256 and optional perceptual image deduplication
 - Stable image IDs when a duplicate is replaced by a higher-resolution master
 - Prometheus metrics and a health endpoint
+- Validated processed-ingest API for using the server as storage only
+- Parallel CLI with recursive directory scanning and optional CUDA inference
 - Optional Chrome extension for ingesting images seen while browsing
 
 ## How it works
@@ -118,6 +120,99 @@ face:
 
 No-face images return `204 No Content` and are not stored.
 
+## Process locally, store remotely
+
+`hvax` can recursively scan files and directory trees, run SCRFD and ArcFace on
+the local machine, and submit the image plus completed face metadata to a remote
+gallery:
+
+```bash
+./build/hvax ingest \
+  --server https://hv.ax \
+  --models-dir ./models \
+  --jobs 4 \
+  ~/Pictures ./another-image.jpg
+```
+
+Directory inputs are recursive by default. `--jobs` controls concurrent decode,
+inference, and upload work; `--no-recursive` limits directory inputs to one
+level. The command prints one result per file and a stored/duplicate/no-face/error
+summary. `HVAX_SERVER` and `HVAX_API_KEY` may be used instead of their flags.
+
+Before running face detection, the CLI sends the image's SHA-256, pHash, dHash,
+and dimensions to `/v1/ingest/check`. Exact duplicates and strong perceptual
+duplicates whose existing master is at least as large skip inference and upload.
+Potential higher-resolution upgrades and borderline perceptual matches are still
+processed so the server can apply embedding confirmation and master replacement.
+Model loading is lazy, so a scan containing only known images never initializes
+ONNX Runtime.
+
+Local inference results are cached by image SHA-256 under
+`$XDG_CACHE_HOME/hvax` or `~/.cache/hvax`. This includes no-face results, which
+the remote gallery intentionally does not store, and completed face payloads
+that can be retried without rerunning ONNX. Cache entries are automatically
+namespaced by model file metadata and detector settings. Use `--cache-dir DIR`
+to choose another location or `--no-cache` to disable it. Cache files contain
+face embeddings and are created with owner-only permissions.
+
+Successful uploads and remote duplicate responses are cached separately by the
+image SHA-256. That cache namespace includes a hash of the normalized remote
+server URL and API paths, so a hit from one gallery is never reused for another.
+These entries skip decoding, inference, and network requests on later scans.
+Use `--no-cache` (or remove that server's `remote-v1` cache directory) if the
+remote gallery has been reset or its images were deleted.
+
+The server lazily loads its ONNX models, so a process that only receives
+`/v1/ingest/processed` requests does not need the models at all. It still decodes
+each image and independently computes SHA-256, pHash, and dHash before applying
+the normal deduplication and gallery persistence rules.
+
+### Local processing server
+
+Run the CLI as a loopback-only ingest server when the browser extension should
+use the local CPU/GPU while keeping the gallery remote:
+
+```bash
+./build/hvax serve \
+  --server https://hv.ax \
+  --models-dir ./models \
+  --jobs 4 \
+  --bind 127.0.0.1 \
+  --port 8080
+```
+
+Add `--cuda` for a GPU-enabled build. The local processor accepts ordinary image
+bytes at `POST /v1/ingest`, checks the remote gallery before inference, and sends
+the image plus completed embeddings to `/v1/ingest/processed`. `GET /v1/stats`
+proxies the remote gallery's authoritative counts. It binds only to loopback by
+default; do not expose it to untrusted networks.
+
+### CUDA client build
+
+The bundled ONNX Runtime distribution is CPU-only. To enable `--cuda`, configure
+against a matching ONNX Runtime GPU distribution:
+
+```bash
+curl -fL -o /tmp/onnxruntime-gpu.tgz \
+  https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-gpu-1.20.1.tgz
+tar -xzf /tmp/onnxruntime-gpu.tgz -C third_party
+
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DHVAX_ORT_ROOT="$PWD/third_party/onnxruntime-linux-x64-gpu-1.20.1"
+cmake --build build -j
+
+./build/hvax ingest \
+  --server https://hv.ax \
+  --models-dir ./models \
+  --cuda --cuda-device 0 --jobs 4 \
+  ~/Pictures
+```
+
+The GPU distribution's CUDA and cuDNN runtime requirements must be installed.
+If `--cuda` is requested from a CPU-only build, the CLI exits with an explicit
+provider-unavailable error rather than silently falling back to CPU.
+
 ## Search
 
 ### By image
@@ -167,6 +262,8 @@ can set it explicitly with `X-Count`.
 | `GET` | `/metrics` | Prometheus text metrics |
 | `GET` | `/v1/stats` | Image, face, embedding-row, and index counts |
 | `POST` | `/v1/ingest` | Detect faces and add an image to the gallery |
+| `POST` | `/v1/ingest/check` | Check SHA-256 and perceptual hashes before processing |
+| `POST` | `/v1/ingest/processed` | Store an image with client-computed faces and embeddings |
 | `POST` | `/v1/query/image` | Search every face found in an image |
 | `POST` | `/v1/query/embedding` | Search one raw or JSON embedding |
 | `POST` | `/v1/query/embedding/batch` | Search concatenated raw embeddings |
@@ -189,6 +286,37 @@ The maximum request size is 20 MiB, and decoded images above 40 megapixels are
 rejected. JPEG, PNG, and WebP are recognized for stored MIME metadata, subject
 to the codecs available in OpenCV.
 
+Processed ingest requires multipart fields named `image` and `payload`. The
+JSON payload is versioned and has this shape:
+
+```json
+{
+  "version": 1,
+  "model": "insightface-buffalo_l",
+  "embedding_dim": 512,
+  "faces": [
+    {
+      "bbox": [421.2, 171.8, 725.4, 566.1],
+      "det_score": 0.94,
+      "landmarks": [[503.1, 319.4], [637.8, 315.2], [572.6, 393.7], [520.4, 468.9], [628.7, 465.3]],
+      "embedding": ["512 finite float values"]
+    }
+  ]
+}
+```
+
+`embedding` must contain numbers rather than the descriptive string shown
+above. The server requires the `insightface-buffalo_l` model identifier,
+validates geometry and scores, rejects zero or non-finite
+embeddings, clamps coordinates to the decoded image, and L2-normalizes every
+embedding. Submit a prepared payload directly with:
+
+```bash
+curl -F 'image=@face.jpg' \
+  -F 'payload=@payload.json;type=application/json' \
+  http://127.0.0.1:8080/v1/ingest/processed
+```
+
 Common response statuses:
 
 | Status | Meaning |
@@ -198,7 +326,9 @@ Common response statuses:
 | `400` | Empty ingest body or malformed embedding input |
 | `401` | Missing or incorrect API key |
 | `404` | Image or face ID does not exist |
+| `413` | The submitted image or processed payload is too large |
 | `415` | Ingest body could not be decoded as an image |
+| `422` | A processed-ingest payload failed validation |
 
 ### Authentication and exposure
 

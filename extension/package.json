@@ -1,7 +1,7 @@
 {
   "name": "hvax-ingest",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Chrome extension: watch every image on a page and POST it to hvaxd.",
   "scripts": {
     "build": "node esbuild.mjs",

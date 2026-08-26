@@ -1,25 +1,19 @@
 #include "hvax/engine.hpp"
 
-#include "hvax/embed/arcface.hpp"
-#include "hvax/util/sha256.hpp"
-#include "hvax/util/time.hpp"
+#include <spdlog/spdlog.h>
 
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <sstream>
 
-#include <spdlog/spdlog.h>
+#include "hvax/embed/arcface.hpp"
+#include "hvax/util/sha256.hpp"
+#include "hvax/util/time.hpp"
 
 namespace hvax {
 
-Engine::Engine(Config cfg) : cfg_(std::move(cfg)) {
-  spdlog::warn("InsightFace buffalo_l weights are licensed for non-commercial research. "
-               "See insightface.ai — this binary is MIT, the models are not.");
-  pipe_ = std::make_unique<Pipeline>(cfg_.models_dir, cfg_.det_size, cfg_.det_thresh, cfg_.nms_thresh,
-                                     cfg_.ort_intra_threads);
-  gallery_ = std::make_unique<Gallery>(cfg_);
-}
+Engine::Engine(Config cfg) : cfg_(std::move(cfg)) { gallery_ = std::make_unique<Gallery>(cfg_); }
 
 Engine::~Engine() {
   try {
@@ -46,13 +40,23 @@ bool Engine::confirm_soft(int64_t image_id, const std::vector<DetectedFace>& fac
   return true;
 }
 
-IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
-  metrics_.ingest_total.fetch_add(1, std::memory_order_relaxed);
-  IngestResult r;
-  if (bytes.empty() || bytes.size() > cfg_.max_upload) {
-    r.status = IngestStatus::bad_image;
-    return r;
+Pipeline& Engine::pipeline() {
+  std::lock_guard lock(pipeline_mu_);
+  if (!pipe_) {
+    spdlog::warn(
+        "InsightFace buffalo_l weights are licensed for non-commercial "
+        "research. "
+        "See insightface.ai — this binary is MIT, the models are not.");
+    pipe_ = std::make_unique<Pipeline>(cfg_.models_dir, cfg_.det_size, cfg_.det_thresh, cfg_.nms_thresh,
+                                       cfg_.ort_intra_threads);
   }
+  return *pipe_;
+}
+
+IngestResult Engine::persist_ingest(std::span<const uint8_t> bytes, const cv::Mat& img,
+                                    const std::vector<DetectedFace>& faces) {
+  std::lock_guard ingest_lock(ingest_mu_);
+  IngestResult r;
   const auto sha = sha256_bytes(bytes);
   r.sha256 = sha;
 
@@ -69,11 +73,6 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
     return r;
   }
 
-  cv::Mat img = decode_image(bytes, cfg_.max_pixels);
-  if (img.empty()) {
-    r.status = IngestStatus::bad_image;
-    return r;
-  }
   r.width = img.cols;
   r.height = img.rows;
   const Mime mime = sniff_mime(bytes);
@@ -104,7 +103,6 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
       metrics_.ingest_dup_phash.fetch_add(1, std::memory_order_relaxed);
       return r;
     }
-    auto faces = pipe_->run(img);
     if (faces.empty()) {
       spdlog::warn("perceptual upgrade of image {} had 0 faces; keeping old master", dup->image_id);
       r.status = IngestStatus::duplicate;
@@ -128,8 +126,6 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
     metrics_.master_replace.fetch_add(1, std::memory_order_relaxed);
     return r;
   }
-
-  std::vector<DetectedFace> faces = pipe_->run(img);
 
   if (dup && !dup->hard) {
     if (confirm_soft(dup->image_id, faces)) {
@@ -176,6 +172,80 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
   return r;
 }
 
+IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
+  metrics_.ingest_total.fetch_add(1, std::memory_order_relaxed);
+  IngestResult r;
+  if (bytes.empty() || bytes.size() > cfg_.max_upload) {
+    r.status = IngestStatus::bad_image;
+    return r;
+  }
+  const auto sha = sha256_bytes(bytes);
+  if (auto hit = gallery_->find_by_sha(sha)) {
+    r.status = IngestStatus::duplicate;
+    r.duplicate = true;
+    r.duplicate_kind = "sha256";
+    r.image_id = hit->image_id;
+    r.width = hit->width;
+    r.height = hit->height;
+    r.sha256 = hit->sha256;
+    r.faces = gallery_->faces_of(hit->image_id);
+    metrics_.ingest_dup_sha.fetch_add(1, std::memory_order_relaxed);
+    return r;
+  }
+  cv::Mat img = decode_image(bytes, cfg_.max_pixels);
+  if (img.empty()) {
+    r.status = IngestStatus::bad_image;
+    return r;
+  }
+  auto faces = pipeline().run(img);
+  return persist_ingest(bytes, img, faces);
+}
+
+IngestResult Engine::ingest_processed(std::span<const uint8_t> bytes, const cv::Mat& bgr,
+                                      const std::vector<DetectedFace>& faces) {
+  metrics_.ingest_total.fetch_add(1, std::memory_order_relaxed);
+  IngestResult r;
+  if (bytes.empty() || bytes.size() > cfg_.max_upload || bgr.empty()) {
+    r.status = IngestStatus::bad_image;
+    return r;
+  }
+  return persist_ingest(bytes, bgr, faces);
+}
+
+IngestCheckResult Engine::check_ingest(const std::array<uint8_t, 32>& sha, uint64_t phash, uint64_t dhash, int width,
+                                       int height) const {
+  IngestCheckResult result;
+  auto duplicate = gallery_->find_by_sha(sha);
+  if (duplicate) {
+    result.duplicate = true;
+    result.process_required = false;
+    result.duplicate_kind = "sha256";
+    result.image_id = duplicate->image_id;
+    result.width = duplicate->width;
+    result.height = duplicate->height;
+    return result;
+  }
+
+  if (cfg_.dedup != DedupMode::perceptual || width <= 0 || height <= 0) return result;
+  const auto hit = gallery_->find_perceptual(phash, dhash);
+  if (!hit || !hit->hard) return result;
+
+  const auto existing = gallery_->image(hit->image_id);
+  const uint64_t incoming_pixels = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
+  const uint64_t existing_pixels = static_cast<uint64_t>(existing.width) * static_cast<uint64_t>(existing.height);
+  if (incoming_pixels > existing_pixels) return result;
+
+  result.duplicate = true;
+  result.process_required = false;
+  result.duplicate_kind = "perceptual";
+  result.image_id = existing.image_id;
+  result.width = existing.width;
+  result.height = existing.height;
+  return result;
+}
+
+std::vector<DetectedFace> Engine::debug_once(const cv::Mat& bgr) { return pipeline().run(bgr); }
+
 std::vector<Hit> Engine::query_embedding(std::span<const float> vec, int k, float min_score) {
   metrics_.query_emb.fetch_add(1, std::memory_order_relaxed);
   auto t0 = std::chrono::steady_clock::now();
@@ -206,7 +276,7 @@ std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::
   metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
   cv::Mat img = decode_image(bytes, cfg_.max_pixels);
   if (img.empty()) return {};
-  auto faces = pipe_->run(img);
+  auto faces = pipeline().run(img);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> out;
   out.reserve(faces.size());
   if (k <= 0) k = cfg_.default_k;

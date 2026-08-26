@@ -6,6 +6,7 @@ const saved = document.querySelector<HTMLParagraphElement>("#saved")!;
 const fields = {
   enabled: document.querySelector<HTMLInputElement>("#enabled")!,
   endpoint: document.querySelector<HTMLInputElement>("#endpoint")!,
+  processorEndpoint: document.querySelector<HTMLInputElement>("#processorEndpoint")!,
   apiKey: document.querySelector<HTMLInputElement>("#apiKey")!,
   minWidth: document.querySelector<HTMLInputElement>("#minWidth")!,
   minHeight: document.querySelector<HTMLInputElement>("#minHeight")!,
@@ -18,6 +19,7 @@ async function load(): Promise<void> {
   const s = (await chrome.storage.sync.get(DEFAULT_SETTINGS)) as Settings;
   fields.enabled.checked = s.enabled;
   fields.endpoint.value = s.endpoint;
+  fields.processorEndpoint.value = s.processorEndpoint;
   fields.apiKey.value = s.apiKey;
   fields.minWidth.value = String(s.minWidth);
   fields.minHeight.value = String(s.minHeight);
@@ -32,6 +34,7 @@ form.addEventListener("submit", (ev) => {
   const next: Settings = {
     enabled: fields.enabled.checked,
     endpoint: fields.endpoint.value.trim() || DEFAULT_SETTINGS.endpoint,
+    processorEndpoint: fields.processorEndpoint.value.trim(),
     apiKey: fields.apiKey.value.trim(),
     minWidth: Math.max(1, Number(fields.minWidth.value) || 64),
     minHeight: Math.max(1, Number(fields.minHeight.value) || 64),

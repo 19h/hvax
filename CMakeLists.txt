@@ -31,10 +31,12 @@ find_package(Threads REQUIRED)
 
 find_path(NLOHMANN_JSON_INCLUDE nlohmann/json.hpp REQUIRED)
 
-# --- ONNX Runtime (prebuilt tarball in-tree) ---
-set(ORT_ROOT "${CMAKE_SOURCE_DIR}/third_party/onnxruntime-linux-x64-1.20.1")
+# --- ONNX Runtime (CPU tarball in-tree; point at a GPU build for --cuda) ---
+set(HVAX_ORT_ROOT "${CMAKE_SOURCE_DIR}/third_party/onnxruntime-linux-x64-1.20.1" CACHE PATH
+    "ONNX Runtime distribution root (use an onnxruntime-gpu build for CUDA)")
+set(ORT_ROOT "${HVAX_ORT_ROOT}")
 if(NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-  message(FATAL_ERROR "ONNX Runtime not found at ${ORT_ROOT}. Extract the official linux-x64 CPU tarball there.")
+  message(FATAL_ERROR "ONNX Runtime not found at ${ORT_ROOT}. Set HVAX_ORT_ROOT to an extracted CPU or GPU distribution.")
 endif()
 
 set(HVAX_LANDING_HTML "${CMAKE_SOURCE_DIR}/landing/index.html")
@@ -75,6 +77,7 @@ set(HVAX_SOURCES
   src/index/exact_scan.cpp
   src/index/hnsw_index.cpp
   src/pipeline.cpp
+  src/processed.cpp
   src/engine.cpp
   src/http/server.cpp
 )
@@ -126,6 +129,14 @@ set_target_properties(hvax-bench PROPERTIES
   INSTALL_RPATH "${ORT_ROOT}/lib"
 )
 
+add_executable(hvax src/client.cpp)
+target_link_libraries(hvax PRIVATE hvax_lib OpenSSL::SSL)
+target_compile_definitions(hvax PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)
+set_target_properties(hvax PROPERTIES
+  BUILD_RPATH "${ORT_ROOT}/lib"
+  INSTALL_RPATH "${ORT_ROOT}/lib"
+)
+
 if(HVAX_BUILD_TESTS)
   find_package(GTest REQUIRED)
   add_executable(hvax_tests
@@ -135,6 +146,7 @@ if(HVAX_BUILD_TESTS)
     tests/test_scrfd_decode.cpp
     tests/test_gallery.cpp
     tests/test_http.cpp
+    tests/test_processed.cpp
   )
   target_link_libraries(hvax_tests PRIVATE hvax_lib GTest::gtest GTest::gtest_main)
   target_compile_definitions(hvax_tests PRIVATE

@@ -125,6 +125,26 @@ async function transcodeBlob(blob: Blob, image?: HTMLImageElement): Promise<Blob
   return canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
 }
 
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error("failed to encode image"));
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("failed to encode image"));
+        return;
+      }
+      const comma = reader.result.indexOf(",");
+      if (comma < 0) {
+        reject(new Error("invalid image data URL"));
+        return;
+      }
+      resolve(reader.result.slice(comma + 1));
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
 async function sendBytes(url: string, width: number, height: number, image?: HTMLImageElement): Promise<void> {
   let res: Response;
   try {
@@ -158,7 +178,9 @@ async function sendBytes(url: string, width: number, height: number, image?: HTM
     mime: body.type || "application/octet-stream",
     width,
     height,
-    bytes: await body.arrayBuffer(),
+    // Chrome serializes extension messages as JSON. ArrayBuffer would arrive
+    // in the service worker as an empty object, so use a JSON-safe encoding.
+    dataBase64: await blobToBase64(body),
   };
   await sendMessage(msg);
 }

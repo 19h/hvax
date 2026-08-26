@@ -1,15 +1,16 @@
 #pragma once
 
-#include "hvax/config.hpp"
-#include "hvax/pipeline.hpp"
-#include "hvax/store/gallery.hpp"
-
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
+
+#include "hvax/config.hpp"
+#include "hvax/pipeline.hpp"
+#include "hvax/store/gallery.hpp"
 
 namespace hvax {
 
@@ -30,6 +31,10 @@ class Engine {
   ~Engine();
 
   IngestResult ingest(std::span<const uint8_t> bytes);
+  IngestResult ingest_processed(std::span<const uint8_t> bytes, const cv::Mat& bgr,
+                                const std::vector<DetectedFace>& faces);
+  IngestCheckResult check_ingest(const std::array<uint8_t, 32>& sha, uint64_t phash, uint64_t dhash, int width,
+                                 int height) const;
   std::vector<Hit> query_embedding(std::span<const float> vec, int k, float min_score);
   std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, int k, float min_score);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes, int k,
@@ -48,14 +53,19 @@ class Engine {
   Metrics& metrics() { return metrics_; }
   std::string prometheus() const;
 
-  std::vector<DetectedFace> debug_once(const cv::Mat& bgr) { return pipe_->run(bgr); }
+  std::vector<DetectedFace> debug_once(const cv::Mat& bgr);
 
  private:
   bool confirm_soft(int64_t image_id, const std::vector<DetectedFace>& faces) const;
+  Pipeline& pipeline();
+  IngestResult persist_ingest(std::span<const uint8_t> bytes, const cv::Mat& img,
+                              const std::vector<DetectedFace>& faces);
 
   Config cfg_;
   std::unique_ptr<Pipeline> pipe_;
   std::unique_ptr<Gallery> gallery_;
+  std::mutex pipeline_mu_;
+  std::mutex ingest_mu_;
   Metrics metrics_;
 };
 

@@ -1,21 +1,25 @@
 #include "hvax/http/server.hpp"
 
-#include "hvax/http/landing_html.hpp"
-#include "hvax/util/hex.hpp"
+#include <spdlog/spdlog.h>
 
 #include <cstring>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
-
 #include "httplib.h"
+#include "hvax/http/landing_html.hpp"
+#include "hvax/processed.hpp"
+#include "hvax/util/hex.hpp"
 
 namespace hvax {
 namespace {
+
+constexpr size_t kMaxProcessedJson = 8 * 1024 * 1024;
+constexpr size_t kMultipartOverhead = 1024 * 1024;
 
 nlohmann::json bbox_json(const BBox& b) { return nlohmann::json::array({b.x1, b.y1, b.x2, b.y2}); }
 
@@ -44,20 +48,29 @@ nlohmann::json hit_json(const Hit& h) {
 nlohmann::json ingest_json(const IngestResult& r) {
   nlohmann::json faces = nlohmann::json::array();
   for (auto& f : r.faces) faces.push_back(face_json(f));
-  nlohmann::json j = {{"image_id", r.image_id},
-                      {"sha256", to_hex(r.sha256)},
-                      {"width", r.width},
-                      {"height", r.height},
-                      {"duplicate", r.duplicate},
-                      {"master_replaced", r.master_replaced},
+  nlohmann::json j = {{"image_id", r.image_id}, {"sha256", to_hex(r.sha256)}, {"width", r.width},
+                      {"height", r.height},     {"duplicate", r.duplicate},   {"master_replaced", r.master_replaced},
                       {"faces", faces}};
   if (!r.duplicate_kind.empty()) j["duplicate_kind"] = r.duplicate_kind;
   if (r.previous) {
-    j["previous"] = {{"width", r.previous->width},
-                     {"height", r.previous->height},
-                     {"sha256", to_hex(r.previous->sha256)}};
+    j["previous"] = {
+        {"width", r.previous->width}, {"height", r.previous->height}, {"sha256", to_hex(r.previous->sha256)}};
   }
   return j;
+}
+
+void set_ingest_response(const IngestResult& r, httplib::Response& res) {
+  if (r.status == IngestStatus::bad_image) {
+    res.status = 415;
+    res.set_content("{\"error\":\"not an image\"}", "application/json");
+    return;
+  }
+  if (r.status == IngestStatus::ignored_no_face) {
+    res.status = 204;
+    return;
+  }
+  res.status = 200;
+  res.set_content(ingest_json(r).dump(), "application/json");
 }
 
 bool check_key(const httplib::Request& req, const Config& cfg) {
@@ -108,7 +121,7 @@ void run_server(Engine& engine) {
   const Config& cfg = engine.config();
   httplib::Server svr;
   svr.new_task_queue = [n = cfg.http_threads] { return new httplib::ThreadPool(n); };
-  svr.set_payload_max_length(cfg.max_upload);
+  svr.set_payload_max_length(cfg.max_upload + kMaxProcessedJson + kMultipartOverhead);
 
   auto auth = [&](const httplib::Request& req, httplib::Response& res) {
     if (check_key(req, cfg)) return true;
@@ -140,6 +153,8 @@ void run_server(Engine& engine) {
       << "GET   /metrics\n"
       << "GET   /v1/stats\n"
       << "POST  /v1/ingest\n"
+      << "POST  /v1/ingest/check\n"
+      << "POST  /v1/ingest/processed\n"
       << "POST  /v1/query/image\n"
       << "POST  /v1/query/embedding\n"
       << "\n"
@@ -187,18 +202,101 @@ void run_server(Engine& engine) {
       res.set_content("{\"error\":\"empty body\"}", "application/json");
       return;
     }
+    if (bytes.size() > cfg.max_upload) {
+      res.status = 413;
+      res.set_content("{\"error\":\"image exceeds max upload size\"}", "application/json");
+      return;
+    }
     auto r = engine.ingest(bytes);
-    if (r.status == IngestStatus::bad_image) {
+    set_ingest_response(r, res);
+  });
+
+  svr.Post("/v1/ingest/check", [&](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    if (req.body.empty() || req.body.size() > 4096) {
+      res.status = 400;
+      res.set_content("{\"error\":\"small JSON body required\"}", "application/json");
+      return;
+    }
+    try {
+      const auto body = nlohmann::json::parse(req.body);
+      if (!body.is_object() || !body.contains("sha256") || !body.contains("phash") || !body.contains("dhash") ||
+          !body.contains("width") || !body.contains("height") || !body["sha256"].is_string() ||
+          !body["phash"].is_string() || !body["dhash"].is_string() || !body["width"].is_number_integer() ||
+          !body["height"].is_number_integer()) {
+        throw std::runtime_error("sha256, phash, dhash, width, and height are required");
+      }
+      std::array<uint8_t, 32> sha{};
+      uint64_t phash = 0;
+      uint64_t dhash = 0;
+      const int width = body["width"].get<int>();
+      const int height = body["height"].get<int>();
+      if (!sha256_from_string(body["sha256"].get<std::string>(), sha) ||
+          !hex64_from_string(body["phash"].get<std::string>(), phash) ||
+          !hex64_from_string(body["dhash"].get<std::string>(), dhash) || width <= 0 || height <= 0 ||
+          static_cast<int64_t>(width) * height > cfg.max_pixels) {
+        throw std::runtime_error("invalid hash or image dimensions");
+      }
+      const auto check = engine.check_ingest(sha, phash, dhash, width, height);
+      nlohmann::json result = {{"duplicate", check.duplicate}, {"process_required", check.process_required}};
+      if (check.duplicate) {
+        result["duplicate_kind"] = check.duplicate_kind;
+        result["image_id"] = check.image_id;
+        result["width"] = check.width;
+        result["height"] = check.height;
+      }
+      res.set_content(result.dump(), "application/json");
+    } catch (const std::exception& error) {
+      res.status = 422;
+      res.set_content(nlohmann::json{{"error", error.what()}}.dump(), "application/json");
+    }
+  });
+
+  svr.Post("/v1/ingest/processed", [&](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    if (!req.has_file("image") || !req.has_file("payload")) {
+      res.status = 400;
+      res.set_content("{\"error\":\"multipart fields 'image' and 'payload' are required\"}", "application/json");
+      return;
+    }
+    const auto image_part = req.get_file_value("image");
+    const auto payload_part = req.get_file_value("payload");
+    if (image_part.content.empty()) {
+      res.status = 400;
+      res.set_content("{\"error\":\"empty image\"}", "application/json");
+      return;
+    }
+    if (image_part.content.size() > cfg.max_upload) {
+      res.status = 413;
+      res.set_content("{\"error\":\"image exceeds max upload size\"}", "application/json");
+      return;
+    }
+    if (payload_part.content.size() > kMaxProcessedJson) {
+      res.status = 413;
+      res.set_content("{\"error\":\"processed payload is too large\"}", "application/json");
+      return;
+    }
+
+    std::vector<DetectedFace> faces;
+    std::string error;
+    if (!parse_processed_payload(payload_part.content, faces, error)) {
+      res.status = 422;
+      res.set_content(nlohmann::json{{"error", error}}.dump(), "application/json");
+      return;
+    }
+    std::vector<uint8_t> bytes(image_part.content.begin(), image_part.content.end());
+    cv::Mat image = decode_image(bytes, cfg.max_pixels);
+    if (image.empty()) {
       res.status = 415;
       res.set_content("{\"error\":\"not an image\"}", "application/json");
       return;
     }
-    if (r.status == IngestStatus::ignored_no_face) {
-      res.status = 204;
+    if (!validate_processed_faces(faces, image.cols, image.rows, error)) {
+      res.status = 422;
+      res.set_content(nlohmann::json{{"error", error}}.dump(), "application/json");
       return;
     }
-    res.status = 200;
-    res.set_content(ingest_json(r).dump(), "application/json");
+    set_ingest_response(engine.ingest_processed(bytes, image, faces), res);
   });
 
   svr.Post("/v1/query/embedding", [&](const httplib::Request& req, httplib::Response& res) {
@@ -243,7 +341,8 @@ void run_server(Engine& engine) {
       return;
     }
     auto* p = reinterpret_cast<const float*>(req.body.data());
-    auto batches = engine.query_embedding_batch(std::span<const float>(p, static_cast<size_t>(nq * kDim)), nq, k, min_s);
+    auto batches =
+        engine.query_embedding_batch(std::span<const float>(p, static_cast<size_t>(nq * kDim)), nq, k, min_s);
     nlohmann::json arr = nlohmann::json::array();
     for (auto& hits : batches) {
       nlohmann::json h = nlohmann::json::array();
@@ -256,6 +355,11 @@ void run_server(Engine& engine) {
   svr.Post("/v1/query/image", [&](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     auto bytes = body_bytes(req);
+    if (bytes.size() > cfg.max_upload) {
+      res.status = 413;
+      res.set_content("{\"error\":\"image exceeds max upload size\"}", "application/json");
+      return;
+    }
     const int k = header_int(req, "X-K", engine.config().default_k);
     const float min_s = header_float(req, "X-Min-Score", engine.config().default_min_score);
     auto groups = engine.query_image(bytes, k, min_s);
@@ -297,12 +401,8 @@ void run_server(Engine& engine) {
     try {
       const int64_t id = std::stoll(req.matches[1]);
       auto im = engine.get_image(id);
-      nlohmann::json j = {{"image_id", im.image_id},
-                          {"sha256", to_hex(im.sha256)},
-                          {"width", im.width},
-                          {"height", im.height},
-                          {"mime", engine.image_mime(id)},
-                          {"nbytes", im.nbytes},
+      nlohmann::json j = {{"image_id", im.image_id}, {"sha256", to_hex(im.sha256)},   {"width", im.width},
+                          {"height", im.height},     {"mime", engine.image_mime(id)}, {"nbytes", im.nbytes},
                           {"face_ids", im.face_ids}};
       res.set_content(j.dump(), "application/json");
     } catch (...) {

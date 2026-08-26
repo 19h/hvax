@@ -10,12 +10,13 @@ namespace hvax {
 
 class OrtContext {
  public:
-  explicit OrtContext(int intra_threads);
+  explicit OrtContext(int intra_threads, bool cuda = false, int cuda_device = 0);
 
   Ort::Env& env() { return env_; }
   Ort::SessionOptions& options() { return opts_; }
   Ort::AllocatorWithDefaultOptions& alloc() { return alloc_; }
   const Ort::MemoryInfo& cpu_mem() const { return cpu_mem_; }
+  bool cuda_enabled() const { return cuda_enabled_; }
 
   std::unique_ptr<Ort::Session> load(const std::string& path);
 
@@ -24,6 +25,7 @@ class OrtContext {
   Ort::SessionOptions opts_;
   Ort::AllocatorWithDefaultOptions alloc_;
   Ort::MemoryInfo cpu_mem_;
+  bool cuda_enabled_ = false;
 };
 
 struct SessionIo {

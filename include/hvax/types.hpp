@@ -97,6 +97,15 @@ struct IngestResult {
   std::vector<FaceView> faces;
 };
 
+struct IngestCheckResult {
+  bool duplicate = false;
+  bool process_required = true;
+  std::string duplicate_kind;
+  int64_t image_id = 0;
+  int width = 0;
+  int height = 0;
+};
+
 // On-disk packed records. Little-endian. Never put embeddings in here.
 struct alignas(8) ImageSlot {
   uint64_t image_id = 0;

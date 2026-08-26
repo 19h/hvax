@@ -5,6 +5,7 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
@@ -44,6 +45,7 @@ class Scrfd {
   int fmc_ = 3;
   int num_anchors_ = 2;
   std::vector<int> strides_{8, 16, 32};
+  std::mutex center_cache_mu_;
   std::map<std::tuple<int, int, int>, std::vector<std::array<float, 2>>> center_cache_;
 };
 

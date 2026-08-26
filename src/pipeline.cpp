@@ -29,8 +29,9 @@ cv::Mat decode_image(std::span<const uint8_t> bytes, int64_t max_pixels) {
   return img;
 }
 
-Pipeline::Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh, int ort_threads) {
-  ort_ = std::make_unique<OrtContext>(ort_threads);
+Pipeline::Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh, int ort_threads,
+                   bool cuda, int cuda_device) {
+  ort_ = std::make_unique<OrtContext>(ort_threads, cuda, cuda_device);
   const auto det_path = models_dir + "/det_10g.onnx";
   const auto rec_path = models_dir + "/w600k_r50.onnx";
   det_ = std::make_unique<Scrfd>(*ort_, det_path, det_size, det_thresh, nms_thresh);

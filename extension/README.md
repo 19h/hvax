@@ -16,13 +16,23 @@ Load unpacked in Chrome: `chrome://extensions` → Developer mode → **Load unp
 
 Popup or Options:
 
-- **server URL** — default `http://127.0.0.1:8080`; a base path or legacy full `/v1/ingest` URL also works (`hvaxd` must be running, bind not limited to localhost if you ingest from another machine)
+- **gallery URL** — remote gallery used for authoritative stats and, by default, ingest
+- **local processor URL** — optional `hvax serve` address such as `http://127.0.0.1:8080`; when set, image bytes go there while stats still come directly from the gallery
 - **API key** — sent as `X-API-Key` if you started `hvaxd --api-key`
 - min width/height — skip favicons and tracking pixels (default 64)
 - capture CSS backgrounds — off if you only want `<img>`
 - skip SVG
 
-`hvaxd` on `127.0.0.1` is reachable from the extension service worker (host permissions). Pages themselves never talk to hvax; the worker does.
+Start a local CPU processor with:
+
+```bash
+./build/hvax serve --server https://hv.ax --models-dir ./models --jobs 4
+```
+
+Add `--cuda` when the binary was built against ONNX Runtime GPU. The processor
+preflights hashes against the gallery, skips known images, computes faces locally,
+and uploads the finished payload. It is reachable from the extension service
+worker on `127.0.0.1`; pages themselves never talk to hvax.
 
 ## What it captures
 
@@ -35,8 +45,9 @@ Popup or Options:
 Same-origin and `data:` images are read in the content script (page cookies
 apply) and forwarded as bytes. `blob:` images are decoded by Chrome and
 normalized to JPEG first, so browser-supported formats also work when the
-server's OpenCV build cannot decode the original container. Cross-origin URLs
-are fetched by the service worker.
+server's OpenCV build cannot decode the original container. Image bytes cross
+the content-script boundary as base64 because Chrome extension messages are
+JSON-serialized. Cross-origin URLs are fetched by the service worker.
 
 Reloading or updating the extension automatically replaces its content script
 in already-open web tabs. Unsupported browser-internal pages still require a
@@ -46,4 +57,5 @@ hvax 204 (no face) is treated as success: the image was seen and ignored by the 
 
 The popup reads authoritative image, face, embedding-row, and search-index stats
 from the server's `/v1/stats` endpoint. Transfer and error counters remain local
-to the current browser session.
+to the current browser session. Its live `pending` count includes both queued
+and currently processing images.

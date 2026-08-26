@@ -2,6 +2,7 @@ import { DEFAULT_SETTINGS, type StatusResponse } from "./types";
 
 const enabled = document.querySelector<HTMLInputElement>("#enabled")!;
 const endpoint = document.querySelector<HTMLInputElement>("#endpoint")!;
+const processorEndpoint = document.querySelector<HTMLInputElement>("#processorEndpoint")!;
 const statusEl = document.querySelector<HTMLParagraphElement>("#status")!;
 const serverStatsEl = document.querySelector<HTMLDListElement>("#server-stats")!;
 const statsEl = document.querySelector<HTMLDListElement>("#stats")!;
@@ -9,6 +10,7 @@ const saveBtn = document.querySelector<HTMLButtonElement>("#save")!;
 const resetBtn = document.querySelector<HTMLButtonElement>("#reset")!;
 const optionsBtn = document.querySelector<HTMLButtonElement>("#options")!;
 let endpointDirty = false;
+let processorEndpointDirty = false;
 
 function renderRows(el: HTMLDListElement, rows: Array<[string, number | string]>): void {
   el.innerHTML = "";
@@ -24,6 +26,7 @@ function renderRows(el: HTMLDListElement, rows: Array<[string, number | string]>
 function render(s: StatusResponse): void {
   enabled.checked = s.settings.enabled;
   if (!endpointDirty) endpoint.value = s.settings.endpoint;
+  if (!processorEndpointDirty) processorEndpoint.value = s.settings.processorEndpoint;
   statusEl.textContent = s.serverError
     ? `server: ${s.serverError}`
     : s.stats.lastError
@@ -44,6 +47,7 @@ function render(s: StatusResponse): void {
   renderRows(serverStatsEl, serverRows);
 
   renderRows(statsEl, [
+    ["pending", s.pending],
     ["seen", s.stats.seen],
     ["posted", s.stats.posted],
     ["stored", s.stats.stored],
@@ -66,10 +70,16 @@ endpoint.addEventListener("input", () => {
   endpointDirty = true;
 });
 
+processorEndpoint.addEventListener("input", () => {
+  processorEndpointDirty = true;
+});
+
 saveBtn.addEventListener("click", () => {
   const url = endpoint.value.trim() || DEFAULT_SETTINGS.endpoint;
-  void chrome.storage.sync.set({ endpoint: url }).then(() => {
+  const processorUrl = processorEndpoint.value.trim();
+  void chrome.storage.sync.set({ endpoint: url, processorEndpoint: processorUrl }).then(() => {
     endpointDirty = false;
+    processorEndpointDirty = false;
     return refresh();
   });
 });

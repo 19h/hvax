@@ -137,6 +137,7 @@ Scrfd::Scrfd(OrtContext& ctx, const std::string& model_path, int det_size, float
 }
 
 const std::vector<std::array<float, 2>>& Scrfd::centers(int height, int width, int stride) {
+  std::lock_guard lock(center_cache_mu_);
   auto key = std::make_tuple(height, width, stride);
   auto it = center_cache_.find(key);
   if (it != center_cache_.end()) return it->second;
