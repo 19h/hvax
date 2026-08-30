@@ -254,10 +254,26 @@
     padding: 0.4rem;
     min-width: 0;
   }
+  .ref-card:hover, .ref-card:focus-within { z-index: 20; }
   .ref-card.remove, .feedback-chip.remove { opacity: 0.45; border-style: dashed; }
   .ref-card.pending, .feedback-chip.pending { border-color: var(--hot); }
-  .ref-preview { display: block; width: 100%; border: 0; background: #000; padding: 0; cursor: crosshair; }
+  .ref-preview {
+    display: block;
+    position: relative;
+    width: 100%;
+    border: 0;
+    background: #000;
+    padding: 0;
+    cursor: crosshair;
+    transform-origin: var(--zoom-x, 50%) var(--zoom-y, 50%);
+    transition: transform 140ms ease, box-shadow 140ms ease;
+  }
   .ref-preview img { display: block; width: 100%; height: 105px; object-fit: contain; }
+  .ref-preview.zoomable:hover, .ref-preview.zoomable:focus-visible {
+    transform: scale(2.5);
+    z-index: 30;
+    box-shadow: 0 0 0 1px var(--cyan), 0 12px 34px #000d;
+  }
   .ref-meta { display: flex; justify-content: space-between; gap: 0.4rem; margin-top: 0.35rem; color: var(--mute); font-size: 11px; }
   .ref-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bright); }
   .ref-remove { border: 0; background: none; color: var(--warn); font: inherit; cursor: pointer; padding: 0; }
@@ -317,14 +333,32 @@
     grid-template-columns: 48px minmax(0, 1fr) auto;
     gap: 0.55rem;
     align-items: center;
+    position: relative;
   }
-  .hit a { display: block; line-height: 0; }
+  .hit:hover, .hit:focus-within { z-index: 20; }
+  .hit-media {
+    display: block;
+    width: 48px;
+    height: 48px;
+    line-height: 0;
+    position: relative;
+  }
   .hit img {
     width: 48px;
     height: 48px;
     object-fit: cover;
     background: #000;
     display: block;
+    position: relative;
+    transform-origin: left center;
+    transition: transform 140ms ease, box-shadow 140ms ease, opacity 120ms ease;
+  }
+  .hit img.loading { opacity: 0.45; }
+  .hit img.load-failed { opacity: 0.55; box-shadow: inset 0 0 0 1px var(--warn); }
+  .hit-media:hover img, .hit-media:focus-visible img {
+    transform: scale(4);
+    z-index: 30;
+    box-shadow: 0 0 0 1px var(--cyan), 0 12px 34px #000d;
   }
   .bar {
     height: 3px;
@@ -409,10 +443,13 @@
     .preview > img, .preview > canvas { max-height: 180px; }
     .hit { grid-template-columns: 48px minmax(0, 1fr); }
     .hit-actions { grid-column: 2; }
+    .ref-preview.zoomable:hover, .ref-preview.zoomable:focus-visible { transform: scale(1.5); }
+    .hit-media:hover img, .hit-media:focus-visible img { transform: scale(3); }
     body { font-size: 12.5px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .live.on i { animation: none; }
+    .ref-preview, .hit img { transition: none; }
     body::before { display: none; }
   }
 </style>
@@ -503,7 +540,10 @@
   const stage = $("stage"), fileEl = $("file"), refsEl = $("refs"), out = $("out");
   const keyEl = $("key"), keyRow = $("keyrow"), copyBtn = $("copy");
   const thumbs = new Map();
+  const thumbPromises = new Map();
   const cropThumbs = new Map();
+  const imageRequestQueue = [];
+  const MAX_IMAGE_REQUESTS = 4;
   const references = [];
   const appliedPositive = new Set();
   const appliedNegative = new Set();
@@ -517,6 +557,9 @@
   let searchError = "";
   let lastSearchMs = 0;
   let activeSearch = null;
+  let activeImageRequests = 0;
+  let thumbGeneration = 0;
+  let resultThumbObserver = null;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -640,15 +683,82 @@
     return c.toDataURL("image/jpeg", 0.86);
   }
 
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function pumpImageRequests() {
+    while (activeImageRequests < MAX_IMAGE_REQUESTS && imageRequestQueue.length > 0) {
+      const job = imageRequestQueue.shift();
+      activeImageRequests++;
+      Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+        activeImageRequests--;
+        pumpImageRequests();
+      });
+    }
+  }
+
+  function scheduleImageRequest(task) {
+    return new Promise((resolve, reject) => {
+      imageRequestQueue.push({ task, resolve, reject });
+      pumpImageRequests();
+    });
+  }
+
+  function retryableImageStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+
+  async function fetchThumbnailOnce(sha256) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch("/v1/images/" + sha256, {
+        headers: keyHdr(), signal: controller.signal
+      });
+      if (response.status === 401) keyRow.classList.add("show", "need");
+      if (!response.ok) {
+        await response.arrayBuffer().catch(() => {});
+        const error = new Error("image HTTP " + response.status);
+        error.status = response.status;
+        throw error;
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) throw new Error("empty image response");
+      return blob;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function fetchThumbnailWithRetry(sha256) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await scheduleImageRequest(() => fetchThumbnailOnce(sha256));
+      } catch (error) {
+        lastError = error;
+        if ((error && error.status && !retryableImageStatus(error.status)) || attempt === 3) break;
+        await delay(250 * Math.pow(2, attempt) + Math.random() * 180);
+      }
+    }
+    throw lastError || new Error("image request failed");
+  }
+
   async function thumb(sha256) {
     if (thumbs.has(sha256)) return thumbs.get(sha256);
-    try {
-      const r = await fetch("/v1/images/" + sha256, { headers: keyHdr() });
-      if (!r.ok) return "";
-      const u = URL.createObjectURL(await r.blob());
-      thumbs.set(sha256, u);
-      return u;
-    } catch (e) { return ""; }
+    if (thumbPromises.has(sha256)) return thumbPromises.get(sha256);
+    const generation = thumbGeneration;
+    const promise = fetchThumbnailWithRetry(sha256).then((blob) => {
+      if (generation !== thumbGeneration) return "";
+      const url = URL.createObjectURL(blob);
+      thumbs.set(sha256, url);
+      return url;
+    }).catch(() => "").finally(() => {
+      if (thumbPromises.get(sha256) === promise) thumbPromises.delete(sha256);
+    });
+    thumbPromises.set(sha256, promise);
+    return promise;
   }
 
   function loadUrl(url) {
@@ -677,10 +787,10 @@
       const sw = Math.min(side, image.naturalWidth - x);
       const sh = Math.min(side, image.naturalHeight - y);
       const canvas = document.createElement("canvas");
-      canvas.width = 96;
-      canvas.height = 96;
-      canvas.getContext("2d").drawImage(image, x, y, sw, sh, 0, 0, 96, 96);
-      const data = canvas.toDataURL("image/jpeg", 0.86);
+      canvas.width = 256;
+      canvas.height = 256;
+      canvas.getContext("2d").drawImage(image, x, y, sw, sh, 0, 0, 256, 256);
+      const data = canvas.toDataURL("image/jpeg", 0.9);
       cropThumbs.set(key, data);
       return data;
     } catch (e) {
@@ -770,8 +880,10 @@
       const cls = "ref-card" + (ref.pendingRemove ? " remove" : "") + (changed ? " pending" : "");
       html += "<div class='" + cls + "' data-ref-card='" + ref.id + "'>";
       if (ref.image) {
-        html += "<button type='button' class='ref-preview' data-ref-preview='" + ref.id +
-          "' aria-label='choose a face from " + esc(ref.file.name) + "'><img alt='' src='" +
+        const canZoom = ref.faces && ref.faces.length > 1;
+        html += "<button type='button' class='ref-preview" + (canZoom ? " zoomable" : "") +
+          "' data-ref-preview='" + ref.id + "' aria-label='choose a face from " + esc(ref.file.name) + "'" +
+          (canZoom ? " title='hover to zoom, then click a face'" : "") + "><img alt='' src='" +
           referencePreview(ref) + "'></button>";
       }
       let state = ref.status === "loading" ? "detecting…" : ref.status === "error" ? ref.error :
@@ -896,6 +1008,10 @@
 
   function renderSearchResults() {
     if (mode !== "query") return;
+    if (resultThumbObserver) {
+      resultThumbObserver.disconnect();
+      resultThumbObserver = null;
+    }
     if (!hasSearched && !searchError) {
       out.className = "";
       out.innerHTML = "";
@@ -913,7 +1029,8 @@
       const label = desiredLabel(faceId);
       const pct = Math.max(0, Math.min(100, Number(hit.score) * 100));
       html += "<div class='hit' data-face='" + esc(faceId) + "' data-img='" + esc(hit.sha256) + "'>" +
-        "<a href='/v1/images/" + esc(hit.sha256) + "' target='_blank' rel='noopener'><img alt='matched face'></a><div>" +
+        "<a class='hit-media' href='/v1/images/" + esc(hit.sha256) +
+        "' target='_blank' rel='noopener' title='hover to zoom · open full image'><img class='loading' alt='matched face' decoding='async'></a><div>" +
         "<span class='v'>" + Number(hit.score).toFixed(3) + "</span>  img " + esc(hit.image_id) +
         "  face " + esc(faceId) + "<div class='bar'><i style='width:" + pct + "%'></i></div></div>" +
         "<div class='hit-actions'><button type='button' data-label='positive'" +
@@ -923,10 +1040,43 @@
     }
     if (results.length > 0) html += "</div>";
     out.innerHTML = html;
+    const loadResultThumbnail = (element, hit) => {
+      const image = element.querySelector("img");
+      if (!image || image.dataset.loading === "1") return;
+      image.dataset.loading = "1";
+      image.classList.add("loading");
+      image.classList.remove("load-failed");
+      faceThumb(hit.sha256, hit.bbox).then((url) => {
+        if (!image.isConnected) return;
+        image.classList.remove("loading");
+        if (url) {
+          image.src = url;
+          image.alt = "matched face";
+          image.title = "";
+        } else {
+          image.classList.add("load-failed");
+          image.alt = "image unavailable";
+          image.title = "Image failed after retries; hover to retry";
+        }
+      }).finally(() => { delete image.dataset.loading; });
+    };
+    if (typeof IntersectionObserver === "function") {
+      resultThumbObserver = new IntersectionObserver((entries, observer) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          observer.unobserve(entry.target);
+          const hit = results.find((item) => Number(item.face_id) === Number(entry.target.dataset.face));
+          if (hit) loadResultThumbnail(entry.target, hit);
+        }
+      }, { rootMargin: "320px 0px" });
+    }
     for (const element of out.querySelectorAll(".hit")) {
       const hit = results.find((item) => Number(item.face_id) === Number(element.dataset.face));
-      const image = element.querySelector("img");
-      faceThumb(hit.sha256, hit.bbox).then((url) => { if (url && image.isConnected) image.src = url; });
+      if (resultThumbObserver) resultThumbObserver.observe(element);
+      else loadResultThumbnail(element, hit);
+      element.querySelector(".hit-media").addEventListener("pointerenter", () => {
+        if (element.querySelector("img").classList.contains("load-failed")) loadResultThumbnail(element, hit);
+      });
       for (const button of element.querySelectorAll("[data-label]")) {
         button.addEventListener("click", () => setFeedback(Number(hit.face_id), button.dataset.label, hit));
       }
@@ -1070,6 +1220,10 @@
   function clearSearch() {
     activeSearch?.abort();
     activeSearch = null;
+    if (resultThumbObserver) {
+      resultThumbObserver.disconnect();
+      resultThumbObserver = null;
+    }
     references.splice(0);
     appliedPositive.clear();
     appliedNegative.clear();
@@ -1080,8 +1234,10 @@
     searchBusy = false;
     searchError = "";
     lastSearchMs = 0;
+    thumbGeneration++;
     for (const url of thumbs.values()) URL.revokeObjectURL(url);
     thumbs.clear();
+    thumbPromises.clear();
     cropThumbs.clear();
     fileEl.value = "";
     renderReferences();

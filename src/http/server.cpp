@@ -4,7 +4,7 @@
 
 #include <cmath>
 #include <cstring>
-#include <fstream>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
@@ -595,14 +595,14 @@ void run_server(Engine& engine) {
       std::array<uint8_t, 32> sha{};
       if (!sha256_from_string(req.matches[1].str(), sha)) throw std::runtime_error("bad image hash");
       auto path = engine.image_file(sha);
-      std::ifstream in(path, std::ios::binary);
-      if (!in) {
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec)) {
         res.status = 404;
         res.set_content("{\"error\":\"file missing\"}", "application/json");
         return;
       }
-      std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      res.set_content(body, engine.image_mime(sha));
+      res.set_header("Cache-Control", "private, max-age=31536000, immutable");
+      res.set_file_content(path.string(), engine.image_mime(sha));
     } catch (...) {
       res.status = 404;
       res.set_content("{\"error\":\"not found\"}", "application/json");

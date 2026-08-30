@@ -152,6 +152,32 @@ TEST(Gallery, TemplateSearchUsesHnswCandidates) {
   std::filesystem::remove_all(dir);
 }
 
+TEST(Gallery, TemplateSearchWorksAfterHnswReload) {
+  auto dir = tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.exact_until = 0;
+  auto image = photo(42, 200, 200);
+  const auto bytes = encode_jpg(image);
+  const auto reference = dummy_face(image, 10).embedding;
+
+  {
+    hvax::Gallery g(cfg);
+    g.insert(bytes, image, hvax::sha256_bytes(bytes), hvax::Mime::jpeg, hvax::hash_image(image),
+             {dummy_face(image, 10)});
+    g.flush();
+  }
+
+  {
+    hvax::Gallery g(cfg);
+    const std::array<hvax::Embedding, 1> positives{reference};
+    const auto hits = g.search_template(positives, {}, {}, 32, 0.5f);
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_EQ(hits[0].image_id, 1);
+  }
+  std::filesystem::remove_all(dir);
+}
+
 TEST(Gallery, MasterReplaceKeepsId) {
   auto dir = tmpdir();
   hvax::Config cfg;

@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "httplib.h"
 #include "hvax/config.hpp"
 #include "hvax/http/jobs.hpp"
 #include "hvax/http/landing_html.hpp"
@@ -23,9 +24,14 @@ TEST(Landing, HtmlDocument) {
   EXPECT_NE(html.find("value=\"32\""), std::string_view::npos);
   EXPECT_NE(html.find("type=\"file\" accept=\"image/*\" multiple"), std::string_view::npos);
   EXPECT_NE(html.find("not my person"), std::string_view::npos);
+  EXPECT_NE(html.find("zoomable"), std::string_view::npos);
+  EXPECT_NE(html.find("IntersectionObserver"), std::string_view::npos);
+  EXPECT_NE(html.find("MAX_IMAGE_REQUESTS = 4"), std::string_view::npos);
 }
 
 TEST(Config, DefaultSearchSizeIsThirtyTwo) { EXPECT_EQ(hvax::Config{}.default_k, 32); }
+
+TEST(Http, ListenBacklogHandlesThumbnailBursts) { EXPECT_GE(CPPHTTPLIB_LISTEN_BACKLOG, 128); }
 
 TEST(PipelineHelpers, SniffMime) {
   const uint8_t jpeg[] = {0xff, 0xd8, 0xff, 0x00};

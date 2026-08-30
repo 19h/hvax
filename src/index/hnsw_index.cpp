@@ -52,6 +52,11 @@ void HnswIndex::open(const std::filesystem::path& path) {
       spdlog::warn("failed to load HNSW {}, starting empty", path.string().c_str());
       impl_->index = make_index();
     } else {
+      // USEARCH restores the graph capacity but not the dense wrapper's pool
+      // of search contexts. Every operation is serialized by mu_, so one
+      // context is sufficient and prevents the first search after a reload
+      // from returning its thread ID to an uninitialized ring buffer.
+      impl_->index.reserve(unum::usearch::index_limits_t{impl_->index.capacity(), 1});
       spdlog::info("loaded HNSW {} size={}", path.string().c_str(), impl_->index.size());
     }
   }
