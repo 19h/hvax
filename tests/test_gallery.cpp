@@ -4,6 +4,7 @@
 #include "hvax/util/sha256.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <unistd.h>
 
@@ -47,6 +48,14 @@ hvax::DetectedFace dummy_face(const cv::Mat& im, int seed) {
   return f;
 }
 
+hvax::DetectedFace mixed_face(const cv::Mat& im, std::initializer_list<std::pair<int, float>> components) {
+  auto face = dummy_face(im, 0);
+  face.embedding.fill(0.f);
+  for (const auto& [dimension, value] : components) face.embedding[static_cast<size_t>(dimension)] = value;
+  hvax::l2_normalize(face.embedding.data());
+  return face;
+}
+
 }  // namespace
 
 TEST(Gallery, InsertSearchNoSql) {
@@ -67,6 +76,79 @@ TEST(Gallery, InsertSearchNoSql) {
   EXPECT_EQ(hits[0].image_id, id);
   EXPECT_EQ(hits[0].sha256, sha);
   EXPECT_GT(hits[0].score, 0.99f);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Gallery, TemplateSearchReturnsUniqueImages) {
+  auto dir = tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  hvax::Gallery g(cfg);
+  auto first = photo(21, 200, 200);
+  auto second = photo(22, 200, 200);
+  const auto reference = dummy_face(first, 3).embedding;
+  const auto first_bytes = encode_jpg(first);
+  const auto first_id = g.insert(first_bytes, first, hvax::sha256_bytes(first_bytes), hvax::Mime::jpeg,
+                                 hvax::hash_image(first), {dummy_face(first, 3), dummy_face(first, 3)});
+  const auto second_bytes = encode_jpg(second);
+  const auto second_id = g.insert(second_bytes, second, hvax::sha256_bytes(second_bytes), hvax::Mime::jpeg,
+                                  hvax::hash_image(second), {dummy_face(second, 3)});
+
+  const std::array<hvax::Embedding, 1> positives{reference};
+  const auto hits = g.search_template(positives, {}, {}, 10, 0.5f);
+  ASSERT_EQ(hits.size(), 2u);
+  EXPECT_NE(hits[0].image_id, hits[1].image_id);
+  EXPECT_TRUE(hits[0].image_id == first_id || hits[0].image_id == second_id);
+  EXPECT_TRUE(hits[1].image_id == first_id || hits[1].image_id == second_id);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Gallery, TemplateNegativesConservativelyDownrankAndExclude) {
+  auto dir = tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  hvax::Gallery g(cfg);
+  auto distractor_image = photo(31, 200, 200);
+  auto target_image = photo(32, 200, 200);
+  const auto distractor_bytes = encode_jpg(distractor_image);
+  const auto target_bytes = encode_jpg(target_image);
+  const auto distractor_id = g.insert(distractor_bytes, distractor_image, hvax::sha256_bytes(distractor_bytes),
+                                      hvax::Mime::jpeg, hvax::hash_image(distractor_image),
+                                      {mixed_face(distractor_image, {{0, 0.6f}, {1, 0.8f}})});
+  const auto target_id = g.insert(target_bytes, target_image, hvax::sha256_bytes(target_bytes), hvax::Mime::jpeg,
+                                  hvax::hash_image(target_image),
+                                  {mixed_face(target_image, {{0, 0.55f}, {2, std::sqrt(1.f - 0.55f * 0.55f)}})});
+  std::array<hvax::Embedding, 1> positives{mixed_face(target_image, {{0, 1.f}}).embedding};
+  std::array<hvax::Embedding, 1> negatives{mixed_face(target_image, {{1, 1.f}}).embedding};
+
+  auto hits = g.search_template(positives, {}, {}, 2, -1.f);
+  ASSERT_EQ(hits.size(), 2u);
+  EXPECT_EQ(hits[0].image_id, distractor_id);
+  hits = g.search_template(positives, negatives, {}, 2, -1.f);
+  ASSERT_EQ(hits.size(), 2u);
+  EXPECT_EQ(hits[0].image_id, target_id);
+
+  const std::array<int64_t, 1> excluded{target_id};
+  hits = g.search_template(positives, negatives, excluded, 2, -1.f);
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_EQ(hits[0].image_id, distractor_id);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(Gallery, TemplateSearchUsesHnswCandidates) {
+  auto dir = tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.exact_until = 0;
+  hvax::Gallery g(cfg);
+  auto image = photo(41, 200, 200);
+  const auto bytes = encode_jpg(image);
+  const auto image_id = g.insert(bytes, image, hvax::sha256_bytes(bytes), hvax::Mime::jpeg,
+                                 hvax::hash_image(image), {dummy_face(image, 9)});
+  const std::array<hvax::Embedding, 1> positives{dummy_face(image, 9).embedding};
+  const auto hits = g.search_template(positives, {}, {}, 32, 0.5f);
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_EQ(hits[0].image_id, image_id);
   std::filesystem::remove_all(dir);
 }
 

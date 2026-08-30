@@ -23,6 +23,7 @@ struct Metrics {
   std::atomic<uint64_t> master_replace{0};
   std::atomic<uint64_t> query_emb{0};
   std::atomic<uint64_t> query_img{0};
+  std::atomic<uint64_t> query_template{0};
   std::atomic<uint64_t> query_us_sum{0};
 };
 
@@ -39,7 +40,11 @@ class Engine {
   std::vector<Hit> query_embedding(std::span<const float> vec, int k, float min_score);
   std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, int k, float min_score);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes, int k,
-                                                                     float min_score);
+                                                                     float min_score, bool detect_only = false);
+  std::vector<Hit> query_template(std::span<const Embedding> positive_embeddings,
+                                  std::span<const int64_t> positive_face_ids,
+                                  std::span<const Embedding> negative_embeddings,
+                                  std::span<const int64_t> negative_face_ids, int k, float min_score);
 
   ImageView get_image(int64_t id) const { return gallery_->image(id); }
   ImageView get_image(const std::array<uint8_t, 32>& sha) const;

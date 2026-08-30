@@ -8,8 +8,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <limits>
+#include <unordered_map>
+#include <unordered_set>
 
 #include <spdlog/spdlog.h>
 
@@ -464,6 +468,99 @@ std::vector<std::vector<Hit>> Gallery::search_batch(const float* queries, int nq
   out.reserve(static_cast<size_t>(nq));
   for (int i = 0; i < nq; ++i) out.push_back(search(queries + i * kDim, k, min_score));
   return out;
+}
+
+std::vector<Hit> Gallery::search_template(std::span<const Embedding> positives,
+                                          std::span<const Embedding> negatives,
+                                          std::span<const int64_t> excluded_image_ids, int k,
+                                          float min_score) const {
+  if (positives.empty() || k <= 0) return {};
+
+  std::shared_lock lock(mu_);
+  const uint64_t n = std::min(embs_.size(), faces_.size());
+  if (n == 0) return {};
+
+  std::unordered_set<uint64_t> excluded_images;
+  excluded_images.reserve(excluded_image_ids.size());
+  for (const int64_t image_id : excluded_image_ids)
+    if (image_id > 0) excluded_images.insert(static_cast<uint64_t>(image_id));
+
+  std::vector<float> positive_scores(positives.size());
+  auto score_row = [&](const float* row) {
+    float maximum = -std::numeric_limits<float>::infinity();
+    for (size_t i = 0; i < positives.size(); ++i) {
+      positive_scores[i] = dot512(positives[i].data(), row);
+      maximum = std::max(maximum, positive_scores[i]);
+    }
+
+    constexpr float beta = 10.f;
+    double weighted_sum = 0.0;
+    double weight_sum = 0.0;
+    for (const float score : positive_scores) {
+      const double weight = std::exp(static_cast<double>(beta * (score - maximum)));
+      weighted_sum += weight * score;
+      weight_sum += weight;
+    }
+    float positive_score = static_cast<float>(weighted_sum / weight_sum);
+    if (negatives.empty()) return positive_score;
+
+    float negative_score = -std::numeric_limits<float>::infinity();
+    for (const auto& negative : negatives)
+      negative_score = std::max(negative_score, dot512(negative.data(), row));
+    return positive_score - 0.5f * std::max(0.f, negative_score - positive_score);
+  };
+
+  std::unordered_map<uint64_t, ScanHit> best_by_image;
+  auto consider = [&](uint64_t row) {
+    if (row >= n) return;
+    const auto& face = faces_.at(row);
+    if (!slot_live(face.flags) || excluded_images.contains(face.image_id)) return;
+    if (face.image_id == 0 || face.image_id > images_.size()) return;
+    const auto& image = images_.at(face.image_id - 1);
+    if (!slot_live(image.flags)) return;
+    const float score = score_row(embs_.at(row).v);
+    if (!std::isfinite(score) || score < min_score) return;
+    const auto found = best_by_image.find(face.image_id);
+    if (found == best_by_image.end() || score > found->second.score ||
+        (score == found->second.score && row < found->second.row))
+      best_by_image[face.image_id] = ScanHit{row, score};
+  };
+
+  if (n < cfg_.exact_until) {
+    for (uint64_t row = 0; row < n; ++row) consider(row);
+  } else {
+    const uint64_t requested = std::max<uint64_t>(512, static_cast<uint64_t>(k) * 16);
+    const int candidate_count = static_cast<int>(std::min<uint64_t>(
+        n, std::min<uint64_t>(requested, static_cast<uint64_t>(std::numeric_limits<int>::max()))));
+    std::unordered_set<uint64_t> candidates;
+    candidates.reserve(static_cast<size_t>(candidate_count) * (positives.size() + 1));
+    auto retrieve = [&](const float* query) {
+      for (const auto& [row, _] : hnsw_.search(query, candidate_count)) candidates.insert(row);
+    };
+    for (const auto& positive : positives) retrieve(positive.data());
+    if (positives.size() > 1) {
+      Embedding centroid{};
+      for (const auto& positive : positives)
+        for (size_t d = 0; d < centroid.size(); ++d) centroid[d] += positive[d];
+      double norm2 = 0.0;
+      for (const float value : centroid) norm2 += static_cast<double>(value) * value;
+      if (std::isfinite(norm2) && norm2 > 0.0) {
+        l2_normalize(centroid.data());
+        retrieve(centroid.data());
+      }
+    }
+    for (const uint64_t row : candidates) consider(row);
+  }
+
+  std::vector<ScanHit> ranked;
+  ranked.reserve(best_by_image.size());
+  for (const auto& [_, hit] : best_by_image) ranked.push_back(hit);
+  std::sort(ranked.begin(), ranked.end(), [](const ScanHit& a, const ScanHit& b) {
+    if (a.score != b.score) return a.score > b.score;
+    return a.row < b.row;
+  });
+  if (ranked.size() > static_cast<size_t>(k)) ranked.resize(static_cast<size_t>(k));
+  return hydrate(ranked);
 }
 
 uint64_t Gallery::live_faces() const {

@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 
 #include "httplib.h"
 #include "hvax/http/landing_html.hpp"
@@ -20,6 +22,8 @@ namespace {
 
 constexpr size_t kMaxProcessedJson = 8 * 1024 * 1024;
 constexpr size_t kMultipartOverhead = 1024 * 1024;
+constexpr size_t kMaxTemplateReferences = 16;
+constexpr int kMaxTemplateResults = 256;
 
 nlohmann::json bbox_json(const BBox& b) { return nlohmann::json::array({b.x1, b.y1, b.x2, b.y2}); }
 
@@ -116,6 +120,92 @@ std::optional<Embedding> parse_embedding_json(const nlohmann::json& j) {
   return e;
 }
 
+bool query_flag(const httplib::Request& req, const char* name) {
+  if (!req.has_param(name)) return false;
+  const std::string value = req.get_param_value(name);
+  return value.empty() || value == "1" || value == "true" || value == "yes";
+}
+
+bool parse_embedding_value(const nlohmann::json& value, Embedding& embedding, std::string& error) {
+  if (!value.is_array() || value.size() != static_cast<size_t>(kDim)) {
+    error = "each reference embedding must contain 512 numbers";
+    return false;
+  }
+  double norm2 = 0.0;
+  for (int i = 0; i < kDim; ++i) {
+    const auto& component = value[static_cast<size_t>(i)];
+    if (!component.is_number()) {
+      error = "reference embeddings must contain only numbers";
+      return false;
+    }
+    try {
+      embedding[static_cast<size_t>(i)] = component.get<float>();
+    } catch (...) {
+      error = "reference embedding component is out of range";
+      return false;
+    }
+    const float number = embedding[static_cast<size_t>(i)];
+    if (!std::isfinite(number)) {
+      error = "reference embeddings must contain finite numbers";
+      return false;
+    }
+    norm2 += static_cast<double>(number) * number;
+  }
+  if (!std::isfinite(norm2) || norm2 <= 0.0) {
+    error = "reference embedding norm must be non-zero and finite";
+    return false;
+  }
+  return true;
+}
+
+bool parse_embedding_list(const nlohmann::json& root, const char* name, std::vector<Embedding>& out,
+                          std::string& error) {
+  if (!root.contains(name)) return true;
+  const auto& values = root[name];
+  if (!values.is_array()) {
+    error = std::string(name) + " must be an array";
+    return false;
+  }
+  out.reserve(values.size());
+  for (const auto& value : values) {
+    Embedding embedding{};
+    if (!parse_embedding_value(value, embedding, error)) return false;
+    out.push_back(embedding);
+  }
+  return true;
+}
+
+bool parse_face_ids(const nlohmann::json& root, const char* name, std::vector<int64_t>& out,
+                    std::string& error) {
+  if (!root.contains(name)) return true;
+  const auto& values = root[name];
+  if (!values.is_array()) {
+    error = std::string(name) + " must be an array";
+    return false;
+  }
+  std::unordered_set<int64_t> seen;
+  out.reserve(values.size());
+  for (const auto& value : values) {
+    if (!value.is_number_integer() && !value.is_number_unsigned()) {
+      error = std::string(name) + " must contain integer face IDs";
+      return false;
+    }
+    int64_t face_id = -1;
+    try {
+      face_id = value.get<int64_t>();
+    } catch (...) {
+      error = std::string(name) + " contains an out-of-range face ID";
+      return false;
+    }
+    if (face_id < 0) {
+      error = std::string(name) + " must contain non-negative face IDs";
+      return false;
+    }
+    if (seen.insert(face_id).second) out.push_back(face_id);
+  }
+  return true;
+}
+
 }  // namespace
 
 void run_server(Engine& engine) {
@@ -165,6 +255,7 @@ void run_server(Engine& engine) {
       << "POST  /v1/ingest/processed\n"
       << "POST  /v1/query/image\n"
       << "POST  /v1/query/embedding\n"
+      << "POST  /v1/query/template\n"
       << "\n"
       << "curl --data-binary @face.jpg \\\n"
       << "     -H 'Content-Type: image/jpeg' \\\n"
@@ -365,6 +456,74 @@ void run_server(Engine& engine) {
     res.set_content(nlohmann::json{{"results", arr}}.dump(), "application/json");
   });
 
+  svr.Post("/v1/query/template", [&](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    try {
+      const auto payload = nlohmann::json::parse(req.body);
+      if (!payload.is_object()) {
+        res.status = 400;
+        res.set_content("{\"error\":\"template body must be a JSON object\"}", "application/json");
+        return;
+      }
+
+      std::vector<Embedding> positive_embeddings;
+      std::vector<Embedding> negative_embeddings;
+      std::vector<int64_t> positive_face_ids;
+      std::vector<int64_t> negative_face_ids;
+      std::string error;
+      if (!parse_embedding_list(payload, "positive_embeddings", positive_embeddings, error) ||
+          !parse_embedding_list(payload, "negative_embeddings", negative_embeddings, error) ||
+          !parse_face_ids(payload, "positive_face_ids", positive_face_ids, error) ||
+          !parse_face_ids(payload, "negative_face_ids", negative_face_ids, error)) {
+        res.status = 400;
+        res.set_content(nlohmann::json{{"error", error}}.dump(), "application/json");
+        return;
+      }
+
+      if (positive_embeddings.size() + positive_face_ids.size() == 0) {
+        res.status = 422;
+        res.set_content("{\"error\":\"at least one positive reference is required\"}", "application/json");
+        return;
+      }
+      if (positive_embeddings.size() + positive_face_ids.size() > kMaxTemplateReferences ||
+          negative_embeddings.size() + negative_face_ids.size() > kMaxTemplateReferences) {
+        res.status = 422;
+        res.set_content("{\"error\":\"template supports at most 16 positive and 16 negative references\"}",
+                        "application/json");
+        return;
+      }
+      const std::unordered_set<int64_t> positive_ids(positive_face_ids.begin(), positive_face_ids.end());
+      for (const int64_t face_id : negative_face_ids) {
+        if (positive_ids.contains(face_id)) {
+          res.status = 422;
+          res.set_content("{\"error\":\"a face cannot be both a positive and negative reference\"}",
+                          "application/json");
+          return;
+        }
+      }
+
+      const int k = header_int(req, "X-K", engine.config().default_k);
+      const float min_s = header_float(req, "X-Min-Score", engine.config().default_min_score);
+      if (k > kMaxTemplateResults || !std::isfinite(min_s)) {
+        res.status = 422;
+        res.set_content("{\"error\":\"X-K must be at most 256 and X-Min-Score must be finite\"}",
+                        "application/json");
+        return;
+      }
+      auto hits = engine.query_template(positive_embeddings, positive_face_ids, negative_embeddings,
+                                        negative_face_ids, k, min_s);
+      nlohmann::json result = nlohmann::json::array();
+      for (const auto& hit : hits) result.push_back(hit_json(hit));
+      res.set_content(nlohmann::json{{"hits", result}}.dump(), "application/json");
+    } catch (const nlohmann::json::exception&) {
+      res.status = 400;
+      res.set_content("{\"error\":\"bad template JSON\"}", "application/json");
+    } catch (const std::exception& error) {
+      res.status = 422;
+      res.set_content(nlohmann::json{{"error", error.what()}}.dump(), "application/json");
+    }
+  });
+
   svr.Post("/v1/query/image", [&](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     auto bytes = body_bytes(req);
@@ -375,7 +534,9 @@ void run_server(Engine& engine) {
     }
     const int k = header_int(req, "X-K", engine.config().default_k);
     const float min_s = header_float(req, "X-Min-Score", engine.config().default_min_score);
-    auto groups = engine.query_image(bytes, k, min_s);
+    const bool detect_only = query_flag(req, "detect_only");
+    const bool include_embedding = query_flag(req, "include_embedding");
+    auto groups = engine.query_image(bytes, k, min_s, detect_only);
     if (groups.empty()) {
       res.status = 204;
       return;
@@ -384,10 +545,13 @@ void run_server(Engine& engine) {
     for (auto& [face, hits] : groups) {
       nlohmann::json hj = nlohmann::json::array();
       for (auto& h : hits) hj.push_back(hit_json(h));
-      queries.push_back({{"bbox", bbox_json(face.box)},
-                         {"det_score", face.det_score},
-                         {"landmarks", kps_json(face.kps)},
-                         {"hits", hj}});
+      nlohmann::json query = {{"bbox", bbox_json(face.box)},
+                              {"det_score", face.det_score},
+                              {"landmarks", kps_json(face.kps)},
+                              {"hits", hj}};
+      if (include_embedding)
+        query["embedding"] = std::vector<float>(face.embedding.begin(), face.embedding.end());
+      queries.push_back(std::move(query));
     }
     res.set_content(nlohmann::json{{"queries", queries}}.dump(), "application/json");
   });

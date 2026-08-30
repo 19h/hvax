@@ -77,6 +77,8 @@ class Gallery {
 
   std::vector<Hit> search(const float* query, int k, float min_score) const;
   std::vector<std::vector<Hit>> search_batch(const float* queries, int nq, int k, float min_score) const;
+  std::vector<Hit> search_template(std::span<const Embedding> positives, std::span<const Embedding> negatives,
+                                   std::span<const int64_t> excluded_image_ids, int k, float min_score) const;
 
   uint64_t live_faces() const;
   uint64_t live_images() const;

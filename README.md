@@ -14,7 +14,7 @@ Python runtime or database required.
 ## Highlights
 
 - SCRFD-10G face detection and ArcFace R50 embeddings via ONNX Runtime
-- Raw-image, single-embedding, and batch-embedding search
+- Raw-image, single-embedding, batch-embedding, and multi-reference template search
 - Exact cosine search for galleries below 100,000 embedding rows
 - USearch HNSW candidate search with exact float32 reranking at that threshold
   and above
@@ -363,13 +363,17 @@ each one:
 ```bash
 curl --data-binary @probe.jpg \
   -H 'Content-Type: image/jpeg' \
-  -H 'X-K: 10' \
+  -H 'X-K: 32' \
   -H 'X-Min-Score: 0.35' \
   http://127.0.0.1:8080/v1/query/image
 ```
 
 The response has the shape `{ "queries": [{ "bbox": ..., "hits": [...] }] }`.
 A probe with no detected faces returns `204 No Content`.
+
+Add `detect_only=1` to extract faces without searching, and
+`include_embedding=1` to include each normalized 512-float embedding in its
+query object. The browser UI uses both flags while building a reference pool.
 
 ### By embedding
 
@@ -378,7 +382,7 @@ Send either 2,048 raw bytes containing 512 little-endian float32 values:
 ```bash
 curl --data-binary @query.f32 \
   -H 'Content-Type: application/octet-stream' \
-  -H 'X-K: 10' \
+  -H 'X-K: 32' \
   -H 'X-Min-Score: 0.35' \
   http://127.0.0.1:8080/v1/query/embedding
 ```
@@ -394,6 +398,28 @@ For batch search, concatenate `N` raw embeddings and use
 `POST /v1/query/embedding/batch`. hvax infers `N` from the body length, or you
 can set it explicitly with `X-Count`.
 
+### By reference template
+
+Use a template to combine uploaded face embeddings with confirmed or rejected
+gallery faces:
+
+```json
+{
+  "positive_embeddings": [["512 finite float values"]],
+  "positive_face_ids": [12, 40],
+  "negative_embeddings": [],
+  "negative_face_ids": [91]
+}
+```
+
+Send this JSON to `POST /v1/query/template`. At least one positive reference is
+required, with at most 16 positive and 16 negative references. Results contain
+at most one face per gallery image. Positive similarities are fused with a
+softmax-weighted mean; a negative reference only penalizes a candidate when it
+is more similar to that negative than to the positive pool. Images supplying a
+positive or negative `face_id` are excluded from the returned results. Template
+queries accept `X-K` values up to 256.
+
 ## HTTP API
 
 | Method | Path | Description |
@@ -407,6 +433,7 @@ can set it explicitly with `X-Count`.
 | `POST` | `/v1/query/image` | Search every face found in an image |
 | `POST` | `/v1/query/embedding` | Search one raw or JSON embedding |
 | `POST` | `/v1/query/embedding/batch` | Search concatenated raw embeddings |
+| `POST` | `/v1/query/template` | Fuse positive and negative reference embeddings/faces |
 | `GET` | `/v1/faces/:id` | Fetch face metadata |
 | `GET` | `/v1/faces/:id?include_embedding=1` | Fetch face metadata and its embedding |
 | `GET` | `/v1/images/:sha256/meta` | Fetch image metadata and face IDs |
@@ -427,7 +454,7 @@ Search endpoints accept these optional headers:
 
 | Header | Default | Meaning |
 |---|---:|---|
-| `X-K` | `10` | Maximum hits per query face or embedding |
+| `X-K` | `32` | Maximum hits per query face, embedding, or template |
 | `X-Min-Score` | `0.0` | Minimum cosine-similarity score |
 | `X-Count` | inferred | Number of embeddings in a batch body |
 
@@ -474,12 +501,12 @@ Common response statuses:
 |---:|---|
 | `200` | Request succeeded |
 | `204` | No face was found, or a delete succeeded |
-| `400` | Empty ingest body or malformed embedding input |
+| `400` | Empty ingest body or malformed embedding/template input |
 | `401` | Missing or incorrect API key |
 | `404` | Image or face ID does not exist |
 | `413` | The submitted image or processed payload is too large |
 | `415` | Ingest body could not be decoded as an image |
-| `422` | A processed-ingest payload failed validation |
+| `422` | A processed-ingest payload or template reference failed validation |
 
 ### Authentication and exposure
 

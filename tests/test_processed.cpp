@@ -104,6 +104,38 @@ TEST(ProcessedIngest, StoresAndDeduplicatesWithoutLoadingModels) {
   std::filesystem::remove_all(dir);
 }
 
+TEST(ProcessedIngest, TemplateFaceIdsBecomeReferencesAndExclusions) {
+  const auto dir = processed_tmpdir();
+  hvax::Config config;
+  config.data_dir = dir.string();
+  config.models_dir = (dir / "models-do-not-exist").string();
+  config.dedup = hvax::DedupMode::sha256;
+  hvax::Engine engine(config);
+
+  cv::Mat first_image;
+  const auto first_bytes = processed_jpeg(first_image);
+  std::vector<hvax::DetectedFace> first_faces{processed_face()};
+  std::string error;
+  ASSERT_TRUE(hvax::validate_processed_faces(first_faces, first_image.cols, first_image.rows, error)) << error;
+  const auto first = engine.ingest_processed(first_bytes, first_image, first_faces);
+
+  cv::Mat second_image(96, 96, CV_8UC3, cv::Scalar(31, 81, 161));
+  std::vector<uint8_t> second_bytes;
+  cv::imencode(".jpg", second_image, second_bytes);
+  std::vector<hvax::DetectedFace> second_faces{processed_face()};
+  ASSERT_TRUE(hvax::validate_processed_faces(second_faces, second_image.cols, second_image.rows, error)) << error;
+  const auto second = engine.ingest_processed(second_bytes, second_image, second_faces);
+
+  ASSERT_EQ(first.faces.size(), 1u);
+  ASSERT_EQ(second.faces.size(), 1u);
+  const std::array<int64_t, 1> positive_face_ids{first.faces[0].face_id};
+  const auto hits = engine.query_template({}, positive_face_ids, {}, {}, 32, 0.5f);
+  ASSERT_EQ(hits.size(), 1u);
+  EXPECT_EQ(hits[0].image_id, second.image_id);
+  EXPECT_EQ(engine.metrics().query_template.load(), 1u);
+  std::filesystem::remove_all(dir);
+}
+
 TEST(ProcessedIngest, PreflightSkipsOnlySafeDuplicates) {
   const auto dir = processed_tmpdir();
   hvax::Config config;
