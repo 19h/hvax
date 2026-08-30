@@ -84,20 +84,47 @@ and [macOS build documentation](https://onnxruntime.ai/docs/build/inferencing.ht
 
 ## Quick start
 
-Download the two checksum-pinned InsightFace models, build the binaries, and
-start the server:
+Install platform dependencies, fetch and verify ONNX Runtime and the two pinned
+InsightFace models, build, and test with one command:
 
 ```bash
-./scripts/download_models.sh
-cmake --preset rel
-cmake --build build -j
-./build/hvaxd --data-dir ./data --models-dir ./models
+make setup
 ```
 
-On Apple silicon, add `--coreml`:
+Subsequent `make` invocations reverify required artifacts and build only changed
+sources. Start the server with:
 
 ```bash
-./build/hvaxd --data-dir ./data --models-dir ./models --coreml
+make run
+```
+
+On Apple silicon, use `make run RUN_ARGS=--coreml`.
+
+`make setup` uses Homebrew on macOS and `apt-get` on Linux. When dependencies
+are already installed, `make bootstrap`, `make`, and `make test` perform setup,
+build, and validation without modifying system packages. Run `make help` for
+debug, release, sanitizer, benchmark, extension, and guarded cleanup targets.
+
+### Make workflow
+
+| Command | Operation |
+|---|---|
+| `make` or `make build` | Verify runtime/models, configure, and incrementally build |
+| `make setup` | Install platform packages, then build and test |
+| `make models` | Fetch missing models, repair checksum failures atomically, or verify existing models |
+| `make runtime` | Fetch or verify the platform ONNX Runtime distribution |
+| `make test` | Build and run CTest |
+| `make clean build` or `make rebuild` | Remove compiled outputs and rebuild |
+| `make debug`, `make release` | Build separate debug or release trees |
+| `make asan` | Build and test with AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make once IMAGE=face.jpg RUN_ARGS=--coreml` | Run one image through the pipeline |
+| `make distclean` | Remove the selected build tree after a repository-boundary check |
+
+Build variables can be overridden without editing the Makefile, for example:
+
+```bash
+make build BUILD_DIR=build-custom BUILD_TYPE=Debug JOBS=8
+make run RUN_ARGS="--coreml --coreml-profile"
 ```
 
 The server listens on `http://127.0.0.1:8080` by default. In another terminal:

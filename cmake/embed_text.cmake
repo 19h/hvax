@@ -15,6 +15,10 @@ get_filename_component(_dir "${OUTPUT}" DIRECTORY)
 file(MAKE_DIRECTORY "${_dir}")
 set(_hdr "#pragma once\ninline constexpr char ${VAR}[] = R\"hvaxhtml(")
 set(_ftr ")hvaxhtml\";\n")
-file(WRITE "${OUTPUT}" "${_hdr}")
-file(APPEND "${OUTPUT}" "${_body}")
-file(APPEND "${OUTPUT}" "${_ftr}")
+set(_temporary "${OUTPUT}.tmp")
+file(WRITE "${_temporary}" "${_hdr}${_body}${_ftr}")
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${_temporary}" "${OUTPUT}"
+  COMMAND_ERROR_IS_FATAL ANY
+)
+file(REMOVE "${_temporary}")
