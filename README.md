@@ -84,7 +84,7 @@ and [macOS build documentation](https://onnxruntime.ai/docs/build/inferencing.ht
 
 ## Quick start
 
-Install platform dependencies, fetch and verify ONNX Runtime and the two pinned
+Install platform dependencies, fetch and verify ONNX Runtime and the pinned
 InsightFace models, build, and test with one command:
 
 ```bash
@@ -232,8 +232,11 @@ use local CPU/GPU/ANE inference while keeping the gallery remote:
 Add `--cuda`, `--coreml`, or `--mps` for accelerated inference. The local
 processor accepts ordinary image bytes at `POST /v1/ingest`, checks the remote
 gallery before inference, and sends the image plus completed embeddings to
-`/v1/ingest/processed`. `GET /v1/stats`
-proxies the remote gallery's authoritative counts. It binds only to loopback by
+`/v1/ingest/processed`. `GET /health`
+reports `jobs` (the `--jobs` HTTP thread-pool size) without contacting the
+gallery. `GET /v1/stats` proxies the remote gallery's authoritative counts and
+adds the same `jobs` field. The Chrome extension reads `jobs` from the ingest
+target and sends that many concurrent POSTs. It binds only to loopback by
 default; do not expose it to untrusted networks.
 
 ### CUDA client build
@@ -395,9 +398,9 @@ can set it explicitly with `X-Count`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Liveness and gallery summary |
+| `GET` | `/health` | Liveness, gallery summary, and HTTP worker count (`jobs`) |
 | `GET` | `/metrics` | Prometheus text metrics |
-| `GET` | `/v1/stats` | Image, face, embedding-row, and index counts |
+| `GET` | `/v1/stats` | Image, face, embedding-row, index counts, and `jobs` |
 | `POST` | `/v1/ingest` | Detect faces and add an image to the gallery |
 | `POST` | `/v1/ingest/check` | Check SHA-256 and perceptual hashes before processing |
 | `POST` | `/v1/ingest/processed` | Store an image with client-computed faces and embeddings |
@@ -429,9 +432,10 @@ Search endpoints accept these optional headers:
 | `X-Count` | inferred | Number of embeddings in a batch body |
 
 Ingest and image-query bodies may be raw encoded images or multipart uploads.
-The maximum request size is 20 MiB, and decoded images above 40 megapixels are
-rejected. JPEG, PNG, and WebP are recognized for stored MIME metadata, subject
-to the codecs available in OpenCV.
+The maximum request size is 20 MiB, and decoded images above 100 megapixels are
+rejected by default. Override the decoded-pixel ceiling with `--max-pixels` on
+both the CLI and server. JPEG, PNG, and WebP are recognized for stored MIME
+metadata, subject to the codecs available in OpenCV.
 
 Processed ingest requires multipart fields named `image` and `payload`. The
 JSON payload is versioned and has this shape:
@@ -657,6 +661,11 @@ npm --prefix extension run build
 
 hvax source code is available under the [MIT License](LICENSE).
 
-The downloaded `det_10g.onnx` and `w600k_r50.onnx` weights are separately
+The downloader also fetches `inswapper_128.onnx` for the sibling movax tool.
+movax's `scripts/extract_inswapper_emap.py` derives the accompanying
+`inswapper_128.emap.f32` projection from that model.
+
+The downloaded `det_10g.onnx`, `w600k_r50.onnx`, and `inswapper_128.onnx`
+weights are separately
 licensed by InsightFace for non-commercial research. They are not covered by
 the MIT license. Contact the model publisher for commercial licensing.

@@ -5,9 +5,12 @@ DEST="${HVAX_MODELS_DIR:-$ROOT/models}"
 mkdir -p "$DEST"
 det="$DEST/det_10g.onnx"
 rec="$DEST/w600k_r50.onnx"
+swap="$DEST/inswapper_128.onnx"
 DET_SHA="5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91"
 REC_SHA="4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+SWAP_SHA="e4a3f08c753cb72d04e10aa0f7dbe3deebbf39567d4ead6dce08e98aa49e16af"
 base="https://huggingface.co/public-data/insightface/resolve/main/models/buffalo_l"
+swap_url="https://huggingface.co/julianko/inswapper_128.onnx/resolve/main/inswapper_128.onnx"
 temporary=""
 trap 'if [[ -n "$temporary" ]]; then rm -f "$temporary"; fi' EXIT
 sha256_file() {
@@ -50,4 +53,5 @@ fetch_verified() {
 }
 fetch_verified "$DET_SHA" "$det" "$base/det_10g.onnx"
 fetch_verified "$REC_SHA" "$rec" "$base/w600k_r50.onnx"
+fetch_verified "$SWAP_SHA" "$swap" "$swap_url"
 echo "models ok in $DEST"

@@ -1,23 +1,107 @@
 import { resolveApiUrl } from "./api";
 import { bumpStats, loadSettings, loadStats, saveStats } from "./settings";
-import { EMPTY_STATS, type ExtMessage, type ServerStats, type Settings, type StatusResponse } from "./types";
+import {
+  EMPTY_STATS,
+  type CaptureImageResponse,
+  type ExtMessage,
+  type ServerStats,
+  type Settings,
+  type StatusResponse,
+} from "./types";
 
 const inFlight = new Set<string>();
 const posted = new Set<string>();
-let chain: Promise<void> = Promise.resolve();
 let pending = 0;
-const MAX_PARALLEL = 2;
+const DEFAULT_JOBS = 2;
+const MAX_JOBS = 256;
+const JOBS_TTL_MS = 30_000;
+let maxParallel = DEFAULT_JOBS;
 let active = 0;
 const waiters: Array<() => void> = [];
+let jobsAt = 0;
+let jobsKey = "";
+let jobsGeneration = 0;
+let jobsRefresh: Promise<void> | null = null;
 
 function enqueue(task: () => Promise<void>): void {
   pending += 1;
-  chain = chain
-    .then(task)
+  void task()
     .catch(() => undefined)
     .finally(() => {
       pending = Math.max(0, pending - 1);
     });
+}
+
+function ingestKey(settings: Settings): string {
+  return `${settings.processorEndpoint || settings.endpoint}\0${settings.apiKey}`;
+}
+
+function parseJobs(value: unknown): number | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return null;
+  const jobs = Math.floor(n);
+  if (jobs < 1) return null;
+  return Math.min(MAX_JOBS, jobs);
+}
+
+function setMaxParallel(n: number): void {
+  maxParallel = n;
+  while (waiters.length > 0 && active < maxParallel) {
+    active += 1;
+    waiters.shift()!();
+  }
+}
+
+function invalidateJobs(): void {
+  jobsAt = 0;
+  jobsKey = "";
+  jobsGeneration += 1;
+}
+
+async function readJobs(url: string, headers: Record<string, string>): Promise<number | null> {
+  const res = await fetch(url, { headers, cache: "no-store", signal: AbortSignal.timeout(2000) });
+  if (!res.ok) return null;
+  const body = (await res.json()) as { jobs?: unknown };
+  return parseJobs(body.jobs);
+}
+
+async function fetchJobs(settings: Settings): Promise<number | null> {
+  const ingestEndpoint = settings.processorEndpoint || settings.endpoint;
+  const accept = { Accept: "application/json" };
+  const authed = settings.apiKey ? { ...accept, "X-API-Key": settings.apiKey } : accept;
+  try {
+    const fromHealth = await readJobs(resolveApiUrl(ingestEndpoint, "/health"), accept);
+    if (fromHealth !== null) return fromHealth;
+  } catch {
+    // Fall through to /v1/stats if /health is missing or has no jobs field.
+  }
+  try {
+    return await readJobs(resolveApiUrl(ingestEndpoint, "/v1/stats"), authed);
+  } catch {
+    return null;
+  }
+}
+
+async function ensureJobs(settings: Settings): Promise<void> {
+  const key = ingestKey(settings);
+  if (key === jobsKey && Date.now() - jobsAt < JOBS_TTL_MS) return;
+  if (!jobsRefresh) {
+    const generation = jobsGeneration;
+    jobsRefresh = (async () => {
+      const n = await fetchJobs(settings);
+      if (generation !== jobsGeneration) return;
+      jobsKey = key;
+      jobsAt = Date.now();
+      if (n !== null) setMaxParallel(n);
+    })().finally(() => {
+      jobsRefresh = null;
+    });
+  }
+  try {
+    await jobsRefresh;
+  } catch {
+    // Keep the last known limit; ingest continues.
+  }
 }
 
 async function injectIntoOpenTabs(): Promise<void> {
@@ -58,7 +142,7 @@ async function fetchServerStats(settings: Settings): Promise<ServerStats> {
 }
 
 function acquire(): Promise<void> {
-  if (active < MAX_PARALLEL) {
+  if (active < maxParallel) {
     active += 1;
     return Promise.resolve();
   }
@@ -66,9 +150,15 @@ function acquire(): Promise<void> {
 }
 
 function release(): void {
-  const next = waiters.shift();
-  if (next) next();
-  else active = Math.max(0, active - 1);
+  if (waiters.length > 0 && active <= maxParallel) {
+    waiters.shift()!();
+    return;
+  }
+  active = Math.max(0, active - 1);
+  if (waiters.length > 0 && active < maxParallel) {
+    active += 1;
+    waiters.shift()!();
+  }
 }
 
 async function updateBadge(): Promise<void> {
@@ -127,26 +217,59 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
   await updateBadge();
 }
 
-async function ingestUrl(url: string, width: number, height: number): Promise<void> {
+async function captureFromFrame(url: string, sender: chrome.runtime.MessageSender): Promise<CaptureImageResponse> {
+  if (sender.tab?.id === undefined) return { ok: false, error: "originating tab unavailable" };
+  try {
+    const options: chrome.tabs.MessageSendOptions = {};
+    if (sender.frameId !== undefined) options.frameId = sender.frameId;
+    const response: unknown = await chrome.tabs.sendMessage(sender.tab.id, { type: "capture-image", url }, options);
+    return response as CaptureImageResponse;
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function ingestUrl(
+  url: string,
+  width: number,
+  height: number,
+  sender: chrome.runtime.MessageSender,
+): Promise<void> {
   const settings = await loadSettings();
   if (width > 0 && height > 0 && (width < settings.minWidth || height < settings.minHeight)) return;
   if (inFlight.has(url) || posted.has(url)) return;
   inFlight.add(url);
-  await acquire();
   try {
-    const res = await fetch(url, { credentials: "omit", cache: "force-cache" });
-    if (!res.ok) throw new Error(`fetch image ${res.status}`);
-    const mime = (res.headers.get("content-type") || "application/octet-stream").split(";")[0]!.trim();
-    const body = await res.arrayBuffer();
-    posted.add(url);
-    await postBody(body, mime, url);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    await bumpStats({ seen: 1, errors: 1, lastError: msg, lastStatus: "fetch" });
-    await updateBadge();
+    await ensureJobs(settings);
+    await acquire();
+    try {
+      let mime = "application/octet-stream";
+      let body: ArrayBuffer;
+      try {
+        const res = await fetch(url, { credentials: "include", cache: "force-cache" });
+        if (!res.ok) throw new Error(`fetch image ${res.status}`);
+        mime = (res.headers.get("content-type") || mime).split(";")[0]!.trim();
+        body = await res.arrayBuffer();
+      } catch (fetchError) {
+        const captured = await captureFromFrame(url, sender);
+        if (!captured.ok || !captured.dataBase64) {
+          const first = fetchError instanceof Error ? fetchError.message : String(fetchError);
+          throw new Error(`${first}; page fallback: ${captured.error || "unavailable"}`);
+        }
+        mime = captured.mime || mime;
+        body = decodeBase64(captured.dataBase64);
+      }
+      posted.add(url);
+      await postBody(body, mime, url);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await bumpStats({ seen: 1, errors: 1, lastError: msg, lastStatus: "fetch" });
+      await updateBadge();
+    } finally {
+      release();
+    }
   } finally {
     inFlight.delete(url);
-    release();
   }
 }
 
@@ -160,32 +283,38 @@ function decodeBase64(data: string): ArrayBuffer {
 async function ingestBytes(sourceUrl: string, mime: string, dataBase64: string): Promise<void> {
   if (inFlight.has(sourceUrl) || posted.has(sourceUrl)) return;
   inFlight.add(sourceUrl);
-  await acquire();
   try {
-    const bytes = decodeBase64(dataBase64);
-    posted.add(sourceUrl);
-    await postBody(bytes, mime, sourceUrl);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    await bumpStats({ seen: 1, errors: 1, lastError: msg, lastStatus: "decode" });
-    await updateBadge();
+    await ensureJobs(await loadSettings());
+    await acquire();
+    try {
+      const bytes = decodeBase64(dataBase64);
+      posted.add(sourceUrl);
+      await postBody(bytes, mime, sourceUrl);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await bumpStats({ seen: 1, errors: 1, lastError: msg, lastStatus: "decode" });
+      await updateBadge();
+    } finally {
+      release();
+    }
   } finally {
     inFlight.delete(sourceUrl);
-    release();
   }
 }
 
-chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((raw: ExtMessage, sender, sendResponse) => {
   if (raw.type === "get-status") {
     void Promise.all([loadSettings(), loadStats()]).then(async ([settings, stats]) => {
       let serverStats: ServerStats | null = null;
       let serverError = "";
+      const jobsP = ensureJobs(settings);
       try {
         serverStats = await fetchServerStats(settings);
       } catch (err) {
         serverError = err instanceof Error ? err.message : String(err);
       }
-      const resp: StatusResponse = { settings, stats, pending, serverStats, serverError };
+      await jobsP;
+      const resp: StatusResponse = { settings, stats, pending, jobs: maxParallel, serverStats, serverError };
       sendResponse(resp);
     });
     return true;
@@ -195,7 +324,7 @@ chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) =>
     return true;
   }
   if (raw.type === "ingest-url") {
-    enqueue(() => ingestUrl(raw.url, raw.width, raw.height));
+    enqueue(() => ingestUrl(raw.url, raw.width, raw.height, sender));
     return false;
   }
   if (raw.type === "ingest-bytes") {
@@ -206,9 +335,11 @@ chrome.runtime.onMessage.addListener((raw: ExtMessage, _sender, sendResponse) =>
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.enabled) {
+  if (area !== "sync") return;
+  if (changes.enabled) {
     void chrome.action.setBadgeText({ text: changes.enabled.newValue ? "" : "off" });
   }
+  if (changes.endpoint || changes.processorEndpoint || changes.apiKey) invalidateJobs();
 });
 
 chrome.runtime.onInstalled.addListener(() => {

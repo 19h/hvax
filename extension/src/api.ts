@@ -1,4 +1,4 @@
-export type ApiPath = "/v1/ingest" | "/v1/stats";
+export type ApiPath = "/v1/ingest" | "/v1/stats" | "/health";
 
 export function resolveApiUrl(configuredUrl: string, apiPath: ApiPath): string {
   const url = new URL(configuredUrl);

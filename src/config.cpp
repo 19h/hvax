@@ -27,6 +27,7 @@ void print_usage() {
       << "  --coreml-low-precision  allow float16 GPU accumulation\n"
       << "  --coreml-profile        log Core ML operator placement\n"
       << "  --http-threads N        default 8\n"
+      << "  --max-pixels N          maximum decoded pixels, default 100000000\n"
       << "  --api-key STR           optional X-API-Key\n"
       << "  --dedup perceptual|sha256|off\n"
       << "  --phash-threshold N     default 10\n"
@@ -81,6 +82,7 @@ Config parse_args(int argc, char** argv) {
       set_provider(InferenceProvider::coreml, "--coreml-profile");
       c.inference.coreml_profile_compute_plan = true;
     } else if (eq(argv[i], "--http-threads")) c.http_threads = std::stoi(need("--http-threads"));
+    else if (eq(argv[i], "--max-pixels")) c.max_pixels = std::stoll(need("--max-pixels"));
     else if (eq(argv[i], "--api-key")) c.api_key = need("--api-key");
     else if (eq(argv[i], "--phash-threshold")) c.phash_threshold = std::stoi(need("--phash-threshold"));
     else if (eq(argv[i], "--dhash-threshold")) c.dhash_threshold = std::stoi(need("--dhash-threshold"));
@@ -104,6 +106,7 @@ Config parse_args(int argc, char** argv) {
     c.inference.coreml_cache_dir = c.data_dir + "/coreml-cache";
   if (c.inference.provider == InferenceProvider::coreml)
     c.inference.expected_concurrency = c.once_image.empty() ? std::min(3, c.http_threads) : 1;
+  if (c.max_pixels <= 0) throw std::runtime_error("--max-pixels must be positive");
   return c;
 }
 

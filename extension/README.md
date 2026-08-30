@@ -32,7 +32,10 @@ Start a local CPU processor with:
 Add `--cuda` when the binary was built against ONNX Runtime GPU. The processor
 preflights hashes against the gallery, skips known images, computes faces locally,
 and uploads the finished payload. It is reachable from the extension service
-worker on `127.0.0.1`; pages themselves never talk to hvax.
+worker on `127.0.0.1`; pages themselves never talk to hvax. The extension reads
+`jobs` from `GET /health` on the ingest target (the local processor URL when
+set, otherwise the gallery) and uses that as its POST concurrency, falling back
+to 2 if the field is absent.
 
 ## What it captures
 
@@ -43,7 +46,12 @@ worker on `127.0.0.1`; pages themselves never talk to hvax.
 - CSS `background-image` URLs when enabled
 
 Same-origin and `data:` images are read in the content script (page cookies
-apply) and forwarded as bytes. `blob:` images are decoded by Chrome and
+apply) and forwarded as bytes. Cross-origin fetches include matching site
+credentials; if a CDN rejects the extension request, hvax retries from the
+originating page frame and finally tries to encode the already-rendered image.
+This supports authenticated image hosts such as private Google Photos URLs when
+their normal page context is required. Canvas extraction remains unavailable
+when a host supplies neither fetch access nor CORS permission. `blob:` images are decoded by Chrome and
 normalized to JPEG first, so browser-supported formats also work when the
 server's OpenCV build cannot decode the original container. Image bytes cross
 the content-script boundary as base64 because Chrome extension messages are

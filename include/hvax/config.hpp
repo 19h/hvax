@@ -26,7 +26,7 @@ struct Config {
   int default_k = 10;
   float default_min_score = 0.0f;
   size_t max_upload = 20 * 1024 * 1024;
-  int64_t max_pixels = 40000000;
+  int64_t max_pixels = 100000000;
   std::string once_image;
   bool compact = false;
   bool print_help = false;

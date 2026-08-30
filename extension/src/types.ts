@@ -62,15 +62,33 @@ export type IngestBytesMessage = {
   dataBase64: string;
 };
 
+export type CaptureImageMessage = {
+  type: "capture-image";
+  url: string;
+};
+
+export type CaptureImageResponse = {
+  ok: boolean;
+  mime?: string;
+  dataBase64?: string;
+  error?: string;
+};
+
 export type GetStatusMessage = { type: "get-status" };
 export type ResetStatsMessage = { type: "reset-stats" };
 
-export type ExtMessage = IngestUrlMessage | IngestBytesMessage | GetStatusMessage | ResetStatsMessage;
+export type ExtMessage =
+  | IngestUrlMessage
+  | IngestBytesMessage
+  | CaptureImageMessage
+  | GetStatusMessage
+  | ResetStatsMessage;
 
 export type StatusResponse = {
   settings: Settings;
   stats: Stats;
   pending: number;
+  jobs: number;
   serverStats: ServerStats | null;
   serverError: string;
 };

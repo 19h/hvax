@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "httplib.h"
+#include "hvax/http/jobs.hpp"
 #include "hvax/pipeline.hpp"
 #include "hvax/processed.hpp"
 #include "hvax/store/phash.hpp"
@@ -48,7 +49,7 @@ struct Options {
   bool cache_enabled = true;
   fs::path cache_dir;
   size_t max_bytes = 20 * 1024 * 1024;
-  int64_t max_pixels = 40'000'000;
+  int64_t max_pixels = 100'000'000;
   std::vector<fs::path> inputs;
 };
 
@@ -263,7 +264,7 @@ void usage() {
             << "  --det-size N           SCRFD input size; positive multiple of 32 (default 640)\n"
             << "  --no-recursive         do not descend into directory inputs\n"
             << "  --max-bytes-mib N      maximum encoded image size (default 20)\n"
-            << "  --max-pixels N         maximum decoded pixels (default 40000000)\n"
+            << "  --max-pixels N         maximum decoded pixels (default 100000000)\n"
             << "  --cache-dir DIR        processing cache (default $XDG_CACHE_HOME/hvax or ~/.cache/hvax)\n"
             << "  --no-cache             disable the processing cache\n"
             << "  --help\n";
@@ -639,18 +640,24 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
   server.new_task_queue = [jobs = options.jobs] { return new httplib::ThreadPool(jobs); };
   server.set_payload_max_length(options.max_bytes);
 
+  auto no_store = [](httplib::Response& response) {
+    response.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    response.set_header("Pragma", "no-cache");
+    response.set_header("Expires", "0");
+  };
+
   server.Get("/health", [&](const httplib::Request&, httplib::Response& response) {
+    no_store(response);
     response.set_content(nlohmann::json{{"status", "ok"},
                                         {"mode", "local-processor"},
-                                        {"remote", options.server}}
+                                        {"remote", options.server},
+                                        {"jobs", options.jobs}}
                              .dump(),
                          "application/json");
   });
 
   server.Get("/v1/stats", [&](const httplib::Request&, httplib::Response& response) {
-    response.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
-    response.set_header("Pragma", "no-cache");
-    response.set_header("Expires", "0");
+    no_store(response);
     try {
       httplib::Client remote(endpoint.origin);
       configure_client(remote);
@@ -658,6 +665,14 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
       if (!result) throw std::runtime_error("HTTP stats transport: " + httplib::to_string(result.error()));
       response.status = result->status;
       const auto content_type = result->get_header_value("Content-Type");
+      if (result->status == 200) {
+        try {
+          response.set_content(hvax::attach_jobs(nlohmann::json::parse(result->body), options.jobs).dump(),
+                               "application/json");
+          return;
+        } catch (...) {
+        }
+      }
       response.set_content(result->body, content_type.empty() ? "application/json" : content_type);
     } catch (const std::exception& error) {
       response.status = 502;
@@ -724,12 +739,14 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
   });
 
   server.Get("/", [&](const httplib::Request&, httplib::Response& response) {
-    response.set_content("hvax local processor\nremote " + options.server + "\nPOST /v1/ingest\nGET /v1/stats\n",
+    response.set_content("hvax local processor\nremote " + options.server + "\njobs " +
+                             std::to_string(options.jobs) + "\nPOST /v1/ingest\nGET /v1/stats\nGET /health\n",
                          "text/plain; charset=utf-8");
   });
 
   std::cout << "hvax local processor listening on http://" << options.bind << ':' << options.port << '\n'
             << "remote gallery " << options.server << '\n'
+            << "jobs " << options.jobs << '\n'
             << std::flush;
   if (!server.listen(options.bind, options.port)) throw std::runtime_error("failed to listen on local processor address");
 }

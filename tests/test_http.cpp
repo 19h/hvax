@@ -3,6 +3,10 @@
 #include <filesystem>
 #include <string_view>
 
+#include <nlohmann/json.hpp>
+
+#include "hvax/config.hpp"
+#include "hvax/http/jobs.hpp"
 #include "hvax/http/landing_html.hpp"
 #include "hvax/pipeline.hpp"
 #include "hvax/util/hex.hpp"
@@ -22,6 +26,22 @@ TEST(PipelineHelpers, SniffMime) {
   EXPECT_EQ(hvax::sniff_mime(jpeg), hvax::Mime::jpeg);
   const uint8_t png[] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
   EXPECT_EQ(hvax::sniff_mime(png), hvax::Mime::png);
+}
+
+TEST(Config, DefaultPixelLimitAcceptsHighResolutionPhotos) {
+  EXPECT_GE(hvax::Config{}.max_pixels, int64_t{8480} * 5664);
+}
+
+TEST(HttpHelpers, AttachJobsOverwritesRemoteField) {
+  const auto out = hvax::attach_jobs(nlohmann::json{{"faces", 1}, {"jobs", 8}}, 4);
+  EXPECT_EQ(out.at("jobs").get<int>(), 4);
+  EXPECT_EQ(out.at("faces").get<int>(), 1);
+}
+
+TEST(HttpHelpers, AttachJobsIgnoresNonObject) {
+  const auto out = hvax::attach_jobs(nlohmann::json::array({1, 2}), 4);
+  EXPECT_TRUE(out.is_array());
+  EXPECT_EQ(out.size(), 2);
 }
 
 TEST(HttpHelpers, HashHexRoundTrip) {

@@ -155,6 +155,7 @@ void run_server(Engine& engine) {
       << "faces     " << g.live_faces() << "\n"
       << "embeds    " << g.embedding_rows() << "\n"
       << "index     " << (g.hnsw_active() ? "hnsw" : "exact") << "\n"
+      << "jobs      " << cfg.http_threads << "\n"
       << "\n"
       << "GET   /health\n"
       << "GET   /metrics\n"
@@ -185,7 +186,8 @@ void run_server(Engine& engine) {
     nlohmann::json j = {{"status", "ok"},
                         {"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
-                        {"hnsw", engine.gallery().hnsw_active()}};
+                        {"hnsw", engine.gallery().hnsw_active()},
+                        {"jobs", cfg.http_threads}};
     res.set_content(j.dump(), "application/json");
   });
 
@@ -200,7 +202,8 @@ void run_server(Engine& engine) {
     nlohmann::json j = {{"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
                         {"embedding_rows", engine.gallery().embedding_rows()},
-                        {"hnsw", engine.gallery().hnsw_active()}};
+                        {"hnsw", engine.gallery().hnsw_active()},
+                        {"jobs", cfg.http_threads}};
     res.set_content(j.dump(), "application/json");
   });
 

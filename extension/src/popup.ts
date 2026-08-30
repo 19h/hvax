@@ -48,6 +48,7 @@ function render(s: StatusResponse): void {
 
   renderRows(statsEl, [
     ["pending", s.pending],
+    ["jobs", s.jobs],
     ["seen", s.stats.seen],
     ["posted", s.stats.posted],
     ["stored", s.stats.stored],
