@@ -24,10 +24,11 @@ cv::Mat letterbox(const cv::Mat& img, int size, float& det_scale, int& new_w, in
     new_h = static_cast<int>(static_cast<float>(new_w) * im_ratio);
   }
   det_scale = static_cast<float>(new_h) / static_cast<float>(h);
-  cv::Mat resized;
-  cv::resize(img, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
-  cv::Mat out = cv::Mat::zeros(size, size, CV_8UC3);
-  resized.copyTo(out(cv::Rect(0, 0, new_w, new_h)));
+  thread_local cv::Mat out;
+  out.create(size, size, CV_8UC3);
+  out.setTo(cv::Scalar::all(0));
+  cv::Mat resized = out(cv::Rect(0, 0, new_w, new_h));
+  cv::resize(img, resized, resized.size(), 0, 0, cv::INTER_LINEAR);
   return out;
 }
 
@@ -36,14 +37,16 @@ void blob_nchw(const cv::Mat& bgr, float mean, float std, std::vector<float>& ou
   const int w = bgr.cols;
   out.resize(static_cast<size_t>(3 * h * w));
   const int hw = h * w;
+  const float scale = 1.0f / std;
+  const float bias = -mean * scale;
   for (int y = 0; y < h; ++y) {
     const cv::Vec3b* row = bgr.ptr<cv::Vec3b>(y);
     for (int x = 0; x < w; ++x) {
       const int i = y * w + x;
       // swapRB: R,G,B from BGR
-      out[static_cast<size_t>(0 * hw + i)] = (static_cast<float>(row[x][2]) - mean) / std;
-      out[static_cast<size_t>(1 * hw + i)] = (static_cast<float>(row[x][1]) - mean) / std;
-      out[static_cast<size_t>(2 * hw + i)] = (static_cast<float>(row[x][0]) - mean) / std;
+      out[static_cast<size_t>(0 * hw + i)] = static_cast<float>(row[x][2]) * scale + bias;
+      out[static_cast<size_t>(1 * hw + i)] = static_cast<float>(row[x][1]) * scale + bias;
+      out[static_cast<size_t>(2 * hw + i)] = static_cast<float>(row[x][0]) * scale + bias;
     }
   }
 }
@@ -100,9 +103,18 @@ std::vector<int> nms_boxes(const std::vector<BBox>& boxes, const std::vector<flo
 
 Scrfd::Scrfd(OrtContext& ctx, const std::string& model_path, int det_size, float det_thresh, float nms_thresh)
     : ctx_(&ctx), det_size_(det_size), det_thresh_(det_thresh), nms_thresh_(nms_thresh) {
+  if (det_size_ <= 0 || det_size_ % 32 != 0)
+    throw std::invalid_argument("SCRFD detector size must be a positive multiple of 32");
   session_ = ctx.load(model_path);
   io_ = inspect(*session_);
   bind_io(io_);
+  if (io_.input_shape.size() != 4) throw std::runtime_error("SCRFD input must be rank 4");
+  if (ctx.coreml_enabled() &&
+      (io_.input_shape[0] != 1 || io_.input_shape[1] != 3 || io_.input_shape[2] != det_size_ ||
+       io_.input_shape[3] != det_size_)) {
+    throw std::runtime_error("CoreML SCRFD spatial specialization failed: expected [1,3," +
+                             std::to_string(det_size_) + "," + std::to_string(det_size_) + "]");
+  }
   if (io_.output_shapes.empty()) throw std::runtime_error("SCRFD has no outputs");
   batched_ = io_.output_shapes[0].size() == 3;
   const size_t nout = io_.output_names.size();
@@ -132,30 +144,28 @@ Scrfd::Scrfd(OrtContext& ctx, const std::string& model_path, int det_size, float
     use_kps_ = nout >= 9;
     num_anchors_ = 2;
   }
+  if (det_size_ % *std::max_element(strides_.begin(), strides_.end()) != 0)
+    throw std::invalid_argument("SCRFD detector size must be divisible by its maximum feature stride");
+  anchor_centers_.reserve(strides_.size());
+  for (const int stride : strides_) {
+    const int height = det_size_ / stride;
+    const int width = det_size_ / stride;
+    std::vector<std::array<float, 2>> centers;
+    centers.reserve(static_cast<size_t>(height * width * num_anchors_));
+    for (int y = 0; y < height; ++y) {
+      for (int x = 0; x < width; ++x) {
+        for (int anchor = 0; anchor < num_anchors_; ++anchor)
+          centers.push_back({static_cast<float>(x * stride), static_cast<float>(y * stride)});
+      }
+    }
+    anchor_centers_.push_back(std::move(centers));
+  }
   spdlog::info("SCRFD batched={} kps={} fmc={} anchors={} det_size={}", batched_, use_kps_, fmc_,
                num_anchors_, det_size_);
 }
 
-const std::vector<std::array<float, 2>>& Scrfd::centers(int height, int width, int stride) {
-  std::lock_guard lock(center_cache_mu_);
-  auto key = std::make_tuple(height, width, stride);
-  auto it = center_cache_.find(key);
-  if (it != center_cache_.end()) return it->second;
-  std::vector<std::array<float, 2>> c;
-  c.reserve(static_cast<size_t>(height * width * num_anchors_));
-  for (int y = 0; y < height; ++y) {
-    for (int x = 0; x < width; ++x) {
-      for (int a = 0; a < num_anchors_; ++a) {
-        c.push_back({static_cast<float>(x * stride), static_cast<float>(y * stride)});
-      }
-    }
-  }
-  auto [ins, _] = center_cache_.emplace(key, std::move(c));
-  return ins->second;
-}
-
 Scrfd::ForwardOut Scrfd::forward(const cv::Mat& padded_bgr) {
-  std::vector<float> blob;
+  thread_local std::vector<float> blob;
   blob_nchw(padded_bgr, 127.5f, 128.0f, blob);
   const int64_t shape[] = {1, 3, padded_bgr.rows, padded_bgr.cols};
   Ort::Value input = Ort::Value::CreateTensor<float>(ctx_->cpu_mem(), blob.data(), blob.size(), shape, 4);
@@ -163,8 +173,9 @@ Scrfd::ForwardOut Scrfd::forward(const cv::Mat& padded_bgr) {
                                io_.output_name_ptrs.data(), io_.output_name_ptrs.size());
 
   ForwardOut out;
-  const int input_h = padded_bgr.rows;
-  const int input_w = padded_bgr.cols;
+  out.scores.reserve(256);
+  out.boxes.reserve(256);
+  out.kps.reserve(256);
 
   for (size_t si = 0; si < strides_.size(); ++si) {
     const int stride = strides_[si];
@@ -179,27 +190,14 @@ Scrfd::ForwardOut Scrfd::forward(const cv::Mat& padded_bgr) {
       kps = outputs[si + static_cast<size_t>(fmc_) * 2].GetTensorData<float>();
     }
 
-    auto ssh = score_t.GetTensorTypeAndShapeInfo().GetShape();
-    const int fh = input_h / stride;
-    const int fw = input_w / stride;
-    const auto& anc = centers(fh, fw, stride);
+    const auto& ssh = io_.output_shapes[si];
+    const auto& anc = anchor_centers_[si];
     const size_t n = anc.size();
 
-    // scores layout: batched [1,N,1] or [N,1] or [N]
-    size_t score_stride = 1;
-    if (ssh.size() >= 3) score_stride = 1;  // last dim 1
-    else if (ssh.size() == 2 && ssh[1] > 1) score_stride = static_cast<size_t>(ssh[1]);
-
+    const size_t score_width =
+        ssh.size() == 2 ? static_cast<size_t>(std::max<int64_t>(ssh[1], 1)) : 1;
     for (size_t i = 0; i < n; ++i) {
-      float sc = scores[i * (ssh.size() >= 3 ? 1 : (ssh.size() == 2 ? 1 : 1))];
-      if (ssh.size() >= 3) {
-        // [1, N, 1]
-        sc = scores[i];
-      } else if (ssh.size() == 2) {
-        sc = scores[i * static_cast<size_t>(std::max<int64_t>(ssh[1], 1))];
-        if (ssh[1] == 1) sc = scores[i];
-      }
-      (void)score_stride;
+      const float sc = scores[i * score_width];
       if (sc < det_thresh_) continue;
       const float* bd = bboxes + i * 4;
       float dist[4] = {bd[0] * stride, bd[1] * stride, bd[2] * stride, bd[3] * stride};
@@ -226,25 +224,21 @@ std::vector<DetectedFace> Scrfd::detect(const cv::Mat& bgr) {
   auto raw = forward(pad);
   if (raw.scores.empty()) return {};
 
-  std::vector<int> order(raw.scores.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [&](int a, int b) { return raw.scores[static_cast<size_t>(a)] > raw.scores[static_cast<size_t>(b)]; });
-
   std::vector<BBox> boxes;
   std::vector<float> scores;
   std::vector<Landmark5> kps;
-  boxes.reserve(order.size());
-  scores.reserve(order.size());
-  kps.reserve(order.size());
-  for (int i : order) {
-    BBox b = raw.boxes[static_cast<size_t>(i)];
+  boxes.reserve(raw.scores.size());
+  scores.reserve(raw.scores.size());
+  kps.reserve(raw.scores.size());
+  for (size_t i = 0; i < raw.scores.size(); ++i) {
+    BBox b = raw.boxes[i];
     b.x1 /= det_scale;
     b.y1 /= det_scale;
     b.x2 /= det_scale;
     b.y2 /= det_scale;
     boxes.push_back(b);
-    scores.push_back(raw.scores[static_cast<size_t>(i)]);
-    Landmark5 k = raw.kps[static_cast<size_t>(i)];
+    scores.push_back(raw.scores[i]);
+    Landmark5 k = raw.kps[i];
     for (auto& p : k.xy) {
       p[0] /= det_scale;
       p[1] /= det_scale;

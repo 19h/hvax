@@ -1,10 +1,10 @@
 # hvax
 
 hvax is a self-hosted face gallery for ingesting images and searching them by
-facial similarity. Its server runs on CPU, while the companion CLI can process
-images on CPU or CUDA before sending completed embeddings to the server. Images,
-metadata, and 512-dimensional embeddings are stored directly on disk—no Python
-runtime or database required.
+facial similarity. Its server and companion CLI can process images on CPU,
+NVIDIA CUDA, or Apple CoreML/Metal before completed embeddings are stored.
+Images, metadata, and 512-dimensional embeddings are stored directly on disk—no
+Python runtime or database required.
 
 > [!IMPORTANT]
 > InsightFace distributes the `buffalo_l` model weights for **non-commercial
@@ -23,7 +23,8 @@ runtime or database required.
 - Stable image IDs when a duplicate is replaced by a higher-resolution master
 - Prometheus metrics and a health endpoint
 - Validated processed-ingest API for using the server as storage only
-- Parallel CLI with recursive directory scanning and optional CUDA inference
+- Parallel CLI with recursive directory scanning and optional CUDA or CoreML
+  inference
 - Optional Chrome extension for ingesting images seen while browsing
 
 ## How it works
@@ -46,8 +47,9 @@ keeping the `image_id` stable.
 
 ## Requirements
 
-hvax currently targets **Linux x86-64** because ONNX Runtime 1.20.1 for that
-platform is bundled in `third_party/`.
+hvax targets Linux x86-64 and Apple-silicon macOS. ONNX Runtime 1.20.1 for Linux
+x86-64 is bundled in `third_party/`; the checksum-pinned macOS arm64 runtime is
+downloaded separately.
 
 - C++20 compiler
 - CMake 3.24 or newer
@@ -67,6 +69,19 @@ sudo apt install build-essential cmake ninja-build curl \
 
 Check that your distribution supplies CMake 3.24 or newer before configuring.
 
+On Apple-silicon macOS with Homebrew:
+
+```bash
+brew install cmake ninja opencv openssl spdlog nlohmann-json googletest
+./scripts/download_onnxruntime.sh
+```
+
+The macOS bootstrap installs the official ONNX Runtime arm64 package. Official
+macOS arm64 packages include `CoreMLExecutionProvider`; hvax rejects `--coreml`
+if that provider is absent instead of falling back silently. See the
+[ONNX Runtime CoreML provider documentation](https://onnxruntime.ai/docs/execution-providers/CoreML-ExecutionProvider.html)
+and [macOS build documentation](https://onnxruntime.ai/docs/build/inferencing.html).
+
 ## Quick start
 
 Download the two checksum-pinned InsightFace models, build the binaries, and
@@ -77,6 +92,12 @@ start the server:
 cmake --preset rel
 cmake --build build -j
 ./build/hvaxd --data-dir ./data --models-dir ./models
+```
+
+On Apple silicon, add `--coreml`:
+
+```bash
+./build/hvaxd --data-dir ./data --models-dir ./models --coreml
 ```
 
 The server listens on `http://127.0.0.1:8080` by default. In another terminal:
@@ -170,7 +191,7 @@ the normal deduplication and gallery persistence rules.
 ### Local processing server
 
 Run the CLI as a loopback-only ingest server when the browser extension should
-use the local CPU/GPU while keeping the gallery remote:
+use local CPU/GPU/ANE inference while keeping the gallery remote:
 
 ```bash
 ./build/hvax serve \
@@ -181,9 +202,10 @@ use the local CPU/GPU while keeping the gallery remote:
   --port 8080
 ```
 
-Add `--cuda` for a GPU-enabled build. The local processor accepts ordinary image
-bytes at `POST /v1/ingest`, checks the remote gallery before inference, and sends
-the image plus completed embeddings to `/v1/ingest/processed`. `GET /v1/stats`
+Add `--cuda`, `--coreml`, or `--mps` for accelerated inference. The local
+processor accepts ordinary image bytes at `POST /v1/ingest`, checks the remote
+gallery before inference, and sends the image plus completed embeddings to
+`/v1/ingest/processed`. `GET /v1/stats`
 proxies the remote gallery's authoritative counts. It binds only to loopback by
 default; do not expose it to untrusted networks.
 
@@ -212,6 +234,94 @@ cmake --build build -j
 The GPU distribution's CUDA and cuDNN runtime requirements must be installed.
 If `--cuda` is requested from a CPU-only build, the CLI exits with an explicit
 provider-unavailable error rather than silently falling back to CPU.
+
+### Apple CoreML/Metal acceleration
+
+`--coreml` uses Core ML with all compatible Apple compute units. The default
+`auto` uses MLProgram for SCRFD plus NeuralNetwork format for ArcFace when one
+inference is expected in flight. With multiple workers it uses NeuralNetwork
+format for both models because that detector scales better under concurrent
+execution.
+
+The distributed SCRFD model has symbolic spatial axes. For CoreML, hvax
+specializes both axes to `--det-size` in the ONNX Runtime session, requires
+static inputs, and verifies the resulting detector input is exactly
+`[1,3,N,N]`. At `N=640`, the resulting optimized node count, CoreML coverage,
+and outputs matched a separately exported static ONNX model without adding a
+generated model artifact. Detector sizes
+must be positive multiples of the maximum feature-pyramid stride, 32 pixels;
+the daemon and local processor reject other values before inference.
+`--mps` is an alias for `--coreml --coreml-compute-units cpu-gpu`, excluding the
+Neural Engine. ONNX Runtime exposes CoreML rather than a PyTorch-style MPS
+execution provider; this alias selects Core ML's CPU-and-GPU compute-unit mode.
+Explicit controls are available:
+
+```text
+--coreml-compute-units all|cpu-gpu|cpu-ane|cpu
+--coreml-model-format auto|mlprogram|neuralnetwork
+--coreml-cache-dir DIR
+--coreml-low-precision
+--coreml-profile
+```
+
+Compiled Core ML models are cached persistently and namespaced by model path,
+size, modification time, detector size, and static-specialization version. The
+daemon defaults to `DATA_DIR/coreml-cache`; the local processor defaults to
+`$XDG_CACHE_HOME/hvax/coreml-models` or `~/.cache/hvax/coreml-models`.
+Changing either model normally selects a new namespace. Remove the cache if a
+model was replaced while preserving its path, size, and modification time.
+
+The default CoreML admission limit is three simultaneous inferences, bounded by
+the configured HTTP worker count. On the measured M4 Max host, throughput
+stopped increasing beyond three while tail latency continued to increase. The
+local processor therefore defaults to `--jobs 3` under CoreML; an explicit
+`--jobs` value is retained.
+
+`--coreml-low-precision` permits float16 GPU accumulation and remains disabled
+unless explicitly requested. In a 43-image deterministic stress corpus with
+133 detected faces, float32 and float16 accumulation produced equal face counts
+and a minimum matched-box IoU of 0.99999989. Box, landmark, and detection-score
+differences reported zero at 10⁻⁸ output precision; minimum corresponding-face
+embedding cosine similarity was 0.99991477, maximum embedding L2 distance was
+0.01305318, and the maximum absolute shift among all pairwise embedding cosine
+scores was 0.00282283. Repeated 200-run CPU+GPU measurements observed
+105.5–105.6 images/s with float32 accumulation and 108.4–109.6 images/s with
+float16 accumulation, a paired increase of 2.65%–3.84%. The option therefore
+exposes the measured throughput/numerical tradeoff without changing the default
+numerical mode. `--coreml-profile` emits
+Core ML partition and compute-plan diagnostics, including exact CPU fallback
+nodes.
+
+Static specialization changes detector partitioning as follows on ONNX Runtime
+1.29.0. The dynamic detector assigned 142/153 optimized nodes to MLProgram and
+133/153 to NeuralNetwork. After specialization and constant folding,
+MLProgram assigns 137/137 detector nodes to one CoreML partition. NeuralNetwork
+assigns 134/137; the only CPU nodes are `AveragePool_36`, `AveragePool_67`, and
+`AveragePool_84`. A semantics-equivalent test export changed their `ceil_mode`
+from 1 to 0 for even feature-map dimensions and obtained full NeuralNetwork
+capture, but concurrency-3 throughput decreased from 263.4 to 193.9 images/s
+(-26.4%). The production graph retains those three CPU nodes; its observed
+throughput was 35.8% higher than the fully captured variant in that sweep.
+
+Measured on an Apple M4 Max, macOS 27.0, ONNX Runtime 1.29.0, detector size 640,
+and the 512×512 Lena fixture (300 steady-state runs after warmup unless stated):
+
+| Backend | Concurrency | Observed mean latency | Observed throughput |
+|---|---:|---:|---:|
+| ORT CPU, 8 threads (200 runs) | 1 | 44.388 ms | 22.529 images/s |
+| CoreML auto, static detector | 1 | 6.831 ms | 146.383 images/s |
+| CoreML auto, static detector | 3 | 11.621 ms | 257.265 images/s |
+
+The static CoreML single-flight throughput ratio was 6.50× relative to 8-thread
+CPU for this input. Approximate 95% confidence half-widths for mean latency were
+0.057 ms for CoreML and 0.326 ms for CPU. Across the
+43-image corpus, CPU and static CoreML produced 133/133 matched faces with no
+count mismatches, minimum IoU 0.99999847, maximum box and landmark absolute
+error 0.00012207 pixels, maximum detection-score absolute error 1.2×10⁻⁷,
+minimum corresponding-face embedding cosine similarity 0.99973571, and maximum
+pairwise cosine-score shift 0.00651477. These empirical bounds characterize
+this host, model pair, and corpus; use `hvax-infer-bench` on the deployment
+distribution.
 
 ## Search
 
@@ -383,8 +493,17 @@ risk of false positives.
 --models-dir DIR        directory containing both ONNX files (default: ./models)
 --bind ADDR             listen address                       (default: 127.0.0.1)
 --port N                listen port                          (default: 8080)
---det-size N            SCRFD letterbox size                 (default: 640)
+--det-size N            SCRFD size, positive multiple of 32  (default: 640)
 --threads N             ONNX Runtime intra-op threads        (default: 8)
+--cuda                  use CUDAExecutionProvider
+--cuda-device N         CUDA device ID                       (default: 0)
+--coreml                use all compatible Apple compute units
+--mps                   use CoreML CPU+GPU only
+--coreml-compute-units  all, cpu-gpu, cpu-ane, or cpu        (default: all)
+--coreml-model-format   auto, mlprogram, or neuralnetwork    (default: auto)
+--coreml-cache-dir DIR  persistent compiled-model cache
+--coreml-low-precision  permit float16 GPU accumulation      (default: off)
+--coreml-profile        log Core ML operator placement       (default: off)
 --http-threads N        HTTP worker threads                  (default: 8)
 --api-key STRING        require X-API-Key on /v1/*           (default: disabled)
 --dedup MODE            perceptual, sha256, or off           (default: perceptual)
@@ -394,8 +513,8 @@ risk of false positives.
 --help                  show command help
 ```
 
-For `--threads`, a good starting point is the number of physical performance
-cores available to the process.
+`--threads` controls CPU execution and CPU fallback nodes. CoreML measurements
+should sweep this value when the selected models contain unsupported operators.
 
 ### Inspect one image without starting HTTP
 
@@ -472,6 +591,33 @@ results:
 ```bash
 ./build/hvax-bench 100000 1000 10
 ```
+
+Run end-to-end inference latency and provider-equivalence checks:
+
+```bash
+./build/hvax-infer-bench models tests/fixtures/lena.jpg cpu 100 10
+HVAX_COREML_CACHE_DIR=.cache/coreml \
+  ./build/hvax-infer-bench models tests/fixtures/lena.jpg coreml 100 10
+HVAX_COREML_CACHE_DIR=.cache/coreml \
+  ./build/hvax-infer-bench models tests/fixtures/lena.jpg compare
+HVAX_COREML_CACHE_DIR=.cache/coreml \
+  ./build/hvax-infer-bench models path/to/image-corpus compare-low-precision
+```
+
+The two comparison modes accept either one image or a recursively scanned
+directory of JPEG, PNG, or WebP files. Faces are matched by maximum-total-IoU
+bipartite assignment rather than output order. The report includes count
+mismatches, box/landmark/score absolute errors, corresponding-face embedding
+cosine and L2 distances, and maximum absolute change over all pairwise
+embedding cosine scores. For `R` reference faces, `C` candidate faces, and `F`
+matched embeddings, matching costs `O(max(R,C)^3)` time and `O(max(R,C))`
+auxiliary space per image; the 512-dimensional all-pairs comparison costs
+`O(512 F^2)` time and `O(512 F)` retained embedding space.
+
+`HVAX_BENCH_CONCURRENCY`, `HVAX_BENCH_TILE_X`, `HVAX_ORT_THREADS`,
+`HVAX_COREML_MODEL_FORMAT`, `HVAX_COREML_FAST_PREDICTION`, and
+`HVAX_COREML_LOW_PRECISION` control benchmark sweeps without changing production
+defaults.
 
 Check the extension separately with:
 

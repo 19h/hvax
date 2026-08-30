@@ -14,6 +14,21 @@ fi
 if [[ ! -f "$rec" ]]; then
   curl -L --fail -o "$rec" "$base/w600k_r50.onnx"
 fi
-echo "$DET_SHA  $det" | sha256sum -c -
-echo "$REC_SHA  $rec" | sha256sum -c -
+verify_sha256() {
+  local expected="$1"
+  local file="$2"
+  local actual
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$file" | awk '{print $1}')"
+  else
+    actual="$(shasum -a 256 "$file" | awk '{print $1}')"
+  fi
+  if [[ "$actual" != "$expected" ]]; then
+    echo "SHA-256 mismatch for $file: expected $expected, got $actual" >&2
+    exit 1
+  fi
+  echo "$file: OK"
+}
+verify_sha256 "$DET_SHA" "$det"
+verify_sha256 "$REC_SHA" "$rec"
 echo "models ok in $DEST"

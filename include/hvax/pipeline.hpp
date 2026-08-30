@@ -15,17 +15,27 @@
 
 namespace hvax {
 
+struct PipelineTimings {
+  double detection_ms = 0.0;
+  double alignment_ms = 0.0;
+  double embedding_ms = 0.0;
+};
+
 class Pipeline {
  public:
   Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh, int ort_threads,
            bool cuda = false, int cuda_device = 0);
+  Pipeline(const std::string& models_dir, int det_size, float det_thresh, float nms_thresh,
+           InferenceOptions inference);
 
   std::vector<DetectedFace> run(const cv::Mat& bgr);
+  std::vector<DetectedFace> run(const cv::Mat& bgr, PipelineTimings* timings);
 
   OrtContext& ort() { return *ort_; }
 
  private:
   std::unique_ptr<OrtContext> ort_;
+  std::unique_ptr<OrtContext> rec_ort_;
   std::unique_ptr<Scrfd> det_;
   std::unique_ptr<ArcFace> rec_;
 };

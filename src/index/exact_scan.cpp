@@ -6,7 +6,9 @@
 #include <cmath>
 #include <queue>
 
+#if defined(__AVX2__)
 #include <immintrin.h>
+#endif
 
 namespace hvax {
 
@@ -41,11 +43,13 @@ std::vector<ScanHit> exact_topk_f32(const float* rows, uint64_t n, const float* 
   for (uint64_t i = 0; i < n; ++i) {
     if (face_flags && (face_flags[i] & kTombstone)) continue;
     const float* row = rows + i * static_cast<uint64_t>(kDim);
-#if defined(__AVX2__)
     if ((i + 8) < n) {
+#if defined(__AVX2__)
       _mm_prefetch(reinterpret_cast<const char*>(rows + (i + 8) * kDim), _MM_HINT_T0);
-    }
+#else
+      __builtin_prefetch(rows + (i + 8) * kDim, 0, 1);
 #endif
+    }
     const float s = dot512(query, row);
     if (s < min_score) continue;
     if (static_cast<int>(heap.size()) < k) {

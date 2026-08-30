@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <semaphore>
 #include <span>
 #include <string>
 #include <vector>
@@ -62,10 +63,12 @@ class Engine {
  private:
   bool confirm_soft(int64_t image_id, const std::vector<DetectedFace>& faces) const;
   Pipeline& pipeline();
+  std::vector<DetectedFace> run_pipeline(const cv::Mat& bgr);
   IngestResult persist_ingest(std::span<const uint8_t> bytes, const cv::Mat& img,
                               const std::vector<DetectedFace>& faces);
 
   Config cfg_;
+  std::counting_semaphore<256> inference_slots_;
   std::unique_ptr<Pipeline> pipe_;
   std::unique_ptr<Gallery> gallery_;
   std::mutex pipeline_mu_;

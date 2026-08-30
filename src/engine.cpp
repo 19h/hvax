@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -13,7 +14,31 @@
 
 namespace hvax {
 
-Engine::Engine(Config cfg) : cfg_(std::move(cfg)) { gallery_ = std::make_unique<Gallery>(cfg_); }
+namespace {
+
+class SemaphorePermit {
+ public:
+  explicit SemaphorePermit(std::counting_semaphore<256>& semaphore) : semaphore_(semaphore) {
+    semaphore_.acquire();
+  }
+  ~SemaphorePermit() { semaphore_.release(); }
+
+  SemaphorePermit(const SemaphorePermit&) = delete;
+  SemaphorePermit& operator=(const SemaphorePermit&) = delete;
+
+ private:
+  std::counting_semaphore<256>& semaphore_;
+};
+
+}  // namespace
+
+Engine::Engine(Config cfg)
+    : cfg_(std::move(cfg)),
+      inference_slots_(cfg_.inference.provider == InferenceProvider::coreml
+                           ? std::clamp(cfg_.inference.expected_concurrency, 1, 256)
+                           : 256) {
+  gallery_ = std::make_unique<Gallery>(cfg_);
+}
 
 Engine::~Engine() {
   try {
@@ -48,9 +73,14 @@ Pipeline& Engine::pipeline() {
         "research. "
         "See insightface.ai — this binary is MIT, the models are not.");
     pipe_ = std::make_unique<Pipeline>(cfg_.models_dir, cfg_.det_size, cfg_.det_thresh, cfg_.nms_thresh,
-                                       cfg_.ort_intra_threads);
+                                       cfg_.inference);
   }
   return *pipe_;
+}
+
+std::vector<DetectedFace> Engine::run_pipeline(const cv::Mat& bgr) {
+  SemaphorePermit permit(inference_slots_);
+  return pipeline().run(bgr);
 }
 
 IngestResult Engine::persist_ingest(std::span<const uint8_t> bytes, const cv::Mat& img,
@@ -197,7 +227,7 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
     r.status = IngestStatus::bad_image;
     return r;
   }
-  auto faces = pipeline().run(img);
+  auto faces = run_pipeline(img);
   return persist_ingest(bytes, img, faces);
 }
 
@@ -244,7 +274,7 @@ IngestCheckResult Engine::check_ingest(const std::array<uint8_t, 32>& sha, uint6
   return result;
 }
 
-std::vector<DetectedFace> Engine::debug_once(const cv::Mat& bgr) { return pipeline().run(bgr); }
+std::vector<DetectedFace> Engine::debug_once(const cv::Mat& bgr) { return run_pipeline(bgr); }
 
 std::vector<Hit> Engine::query_embedding(std::span<const float> vec, int k, float min_score) {
   metrics_.query_emb.fetch_add(1, std::memory_order_relaxed);
@@ -276,7 +306,7 @@ std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::
   metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
   cv::Mat img = decode_image(bytes, cfg_.max_pixels);
   if (img.empty()) return {};
-  auto faces = pipeline().run(img);
+  auto faces = run_pipeline(img);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> out;
   out.reserve(faces.size());
   if (k <= 0) k = cfg_.default_k;

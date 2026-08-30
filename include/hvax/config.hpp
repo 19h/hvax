@@ -1,5 +1,6 @@
 #pragma once
 
+#include "hvax/infer/ort.hpp"
 #include "hvax/types.hpp"
 
 #include <cstdint>
@@ -15,7 +16,7 @@ struct Config {
   int det_size = 640;
   float det_thresh = 0.5f;
   float nms_thresh = 0.4f;
-  int ort_intra_threads = 8;
+  InferenceOptions inference{.intra_threads = 8};
   int http_threads = 8;
   std::string api_key;
   DedupMode dedup = DedupMode::perceptual;

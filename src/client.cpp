@@ -41,10 +41,9 @@ struct Options {
   int det_size = 640;
   float det_thresh = 0.5f;
   float nms_thresh = 0.4f;
-  int ort_threads = 1;
+  hvax::InferenceOptions inference{.intra_threads = 1};
   int jobs = std::min(4u, std::max(1u, std::thread::hardware_concurrency()));
-  bool cuda = false;
-  int cuda_device = 0;
+  bool jobs_explicit = false;
   bool recursive = true;
   bool cache_enabled = true;
   fs::path cache_dir;
@@ -82,8 +81,7 @@ class LazyPipeline {
     std::call_once(once_, [&] {
       try {
         pipeline_ = std::make_unique<hvax::Pipeline>(options_.models_dir, options_.det_size, options_.det_thresh,
-                                                     options_.nms_thresh, options_.ort_threads, options_.cuda,
-                                                     options_.cuda_device);
+                                                     options_.nms_thresh, options_.inference);
       } catch (const std::exception& error) {
         initialization_error_ = error.what();
       }
@@ -119,7 +117,7 @@ std::string model_stamp(const fs::path& path) {
   const auto size = fs::file_size(path, error);
   if (error) return path.filename().string() + ":missing";
   const auto modified = fs::last_write_time(path, error);
-  const auto ticks = error ? int64_t{0} : modified.time_since_epoch().count();
+  const auto ticks = error ? int64_t{0} : static_cast<int64_t>(modified.time_since_epoch().count());
   return path.filename().string() + ':' + std::to_string(size) + ':' + std::to_string(ticks);
 }
 
@@ -133,7 +131,12 @@ class ProcessingCache {
                         << model_stamp(fs::path(options.models_dir) / "w600k_r50.onnx") << '\n'
                         << options.det_size << '\n'
                         << options.det_thresh << '\n'
-                        << options.nms_thresh << '\n';
+                        << options.nms_thresh << '\n'
+                        << hvax::to_string(options.inference.provider) << '\n'
+                        << options.inference.expected_concurrency << '\n'
+                        << hvax::to_string(options.inference.coreml_compute_units) << '\n'
+                        << hvax::to_string(options.inference.coreml_model_format) << '\n'
+                        << options.inference.coreml_allow_low_precision_accumulation << '\n';
     processed_root_ = options.cache_dir / "processed-v1" / fingerprint(processing_identity.str());
 
     // Remote-presence entries must never leak between galleries. Use the parsed,
@@ -245,13 +248,19 @@ void usage() {
                "./models)\n"
             << "  --cuda                 use ONNX Runtime CUDAExecutionProvider\n"
             << "  --cuda-device N        CUDA device ID (default 0)\n"
-            << "  --jobs N               concurrent process/upload jobs (default up "
-               "to 4)\n"
+            << "  --coreml               use CoreML with all Apple compute units\n"
+            << "  --mps                  use CoreML CPU+GPU (Metal/MPS-oriented alias)\n"
+            << "  --coreml-compute-units all|cpu-gpu|cpu-ane|cpu\n"
+            << "  --coreml-model-format auto|mlprogram|neuralnetwork\n"
+            << "  --coreml-cache-dir DIR persistent compiled-model cache\n"
+            << "  --coreml-low-precision allow float16 GPU accumulation\n"
+            << "  --coreml-profile       log Core ML operator placement\n"
+            << "  --jobs N               concurrent jobs (default 3 with CoreML, otherwise up to 4)\n"
             << "  --bind ADDRESS         serve bind address (default 127.0.0.1)\n"
             << "  --port N               serve port (default 8080)\n"
             << "  --threads N            ONNX Runtime threads per inference call "
                "(default 1)\n"
-            << "  --det-size N           SCRFD input size (default 640)\n"
+            << "  --det-size N           SCRFD input size; positive multiple of 32 (default 640)\n"
             << "  --no-recursive         do not descend into directory inputs\n"
             << "  --max-bytes-mib N      maximum encoded image size (default 20)\n"
             << "  --max-pixels N         maximum decoded pixels (default 40000000)\n"
@@ -267,6 +276,11 @@ const char* need_value(int& index, int argc, char** argv, const char* name) {
 
 Options parse_options(int argc, char** argv) {
   Options out;
+  auto set_provider = [&](hvax::InferenceProvider provider, std::string_view flag) {
+    if (out.inference.provider != hvax::InferenceProvider::cpu && out.inference.provider != provider)
+      throw std::runtime_error(std::string(flag) + " conflicts with another execution provider");
+    out.inference.provider = provider;
+  };
   out.cache_dir = default_cache_dir();
   if (const char* value = std::getenv("HVAX_SERVER")) {
     out.server = value;
@@ -294,18 +308,41 @@ Options parse_options(int argc, char** argv) {
     } else if (arg == "--models-dir") {
       out.models_dir = need_value(i, argc, argv, "--models-dir");
     } else if (arg == "--cuda") {
-      out.cuda = true;
+      set_provider(hvax::InferenceProvider::cuda, arg);
     } else if (arg == "--cuda-device") {
-      out.cuda = true;
-      out.cuda_device = std::stoi(need_value(i, argc, argv, "--cuda-device"));
+      set_provider(hvax::InferenceProvider::cuda, arg);
+      out.inference.device_id = std::stoi(need_value(i, argc, argv, "--cuda-device"));
+    } else if (arg == "--coreml") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+    } else if (arg == "--mps") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_compute_units = hvax::CoreMlComputeUnits::cpu_and_gpu;
+    } else if (arg == "--coreml-compute-units") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_compute_units =
+          hvax::parse_coreml_compute_units(need_value(i, argc, argv, "--coreml-compute-units"));
+    } else if (arg == "--coreml-cache-dir") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_cache_dir = need_value(i, argc, argv, "--coreml-cache-dir");
+    } else if (arg == "--coreml-model-format") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_model_format =
+          hvax::parse_coreml_model_format(need_value(i, argc, argv, "--coreml-model-format"));
+    } else if (arg == "--coreml-low-precision") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_allow_low_precision_accumulation = true;
+    } else if (arg == "--coreml-profile") {
+      set_provider(hvax::InferenceProvider::coreml, arg);
+      out.inference.coreml_profile_compute_plan = true;
     } else if (arg == "--jobs") {
       out.jobs = std::stoi(need_value(i, argc, argv, "--jobs"));
+      out.jobs_explicit = true;
     } else if (arg == "--bind") {
       out.bind = need_value(i, argc, argv, "--bind");
     } else if (arg == "--port") {
       out.port = std::stoi(need_value(i, argc, argv, "--port"));
     } else if (arg == "--threads") {
-      out.ort_threads = std::stoi(need_value(i, argc, argv, "--threads"));
+      out.inference.intra_threads = std::stoi(need_value(i, argc, argv, "--threads"));
     } else if (arg == "--det-size") {
       out.det_size = std::stoi(need_value(i, argc, argv, "--det-size"));
     } else if (arg == "--no-recursive") {
@@ -330,11 +367,17 @@ Options parse_options(int argc, char** argv) {
   if (out.command == "serve" && !out.inputs.empty()) throw std::runtime_error("serve does not accept file inputs");
   if (out.command == "serve" && !out.server_set)
     throw std::runtime_error("serve requires a remote --server URL (or HVAX_SERVER)");
-  if (out.jobs <= 0 || out.ort_threads <= 0 || out.det_size <= 0 || out.max_bytes == 0 || out.max_pixels <= 0)
+  if (out.jobs <= 0 || out.inference.intra_threads <= 0 || out.det_size <= 0 || out.max_bytes == 0 || out.max_pixels <= 0)
     throw std::runtime_error("numeric options must be positive");
+  if (out.det_size % 32 != 0) throw std::runtime_error("--det-size must be a multiple of 32");
   if (out.jobs > 256) throw std::runtime_error("--jobs must not exceed 256");
   if (out.port <= 0 || out.port > 65535) throw std::runtime_error("--port must be between 1 and 65535");
-  if (out.cuda_device < 0) throw std::runtime_error("CUDA device must be non-negative");
+  if (out.inference.device_id < 0) throw std::runtime_error("CUDA device must be non-negative");
+  if (out.inference.provider == hvax::InferenceProvider::coreml && out.inference.coreml_cache_dir.empty() &&
+      out.cache_enabled && !out.cache_dir.empty())
+    out.inference.coreml_cache_dir = out.cache_dir / "coreml-models";
+  if (out.inference.provider == hvax::InferenceProvider::coreml && !out.jobs_explicit) out.jobs = 3;
+  out.inference.expected_concurrency = out.jobs;
   return out;
 }
 
