@@ -428,6 +428,7 @@ queries accept `X-K` values up to 256.
 | `GET` | `/metrics` | Prometheus text metrics |
 | `GET` | `/v1/stats` | Image, face, embedding-row, index counts, and `jobs` |
 | `POST` | `/v1/ingest` | Detect faces and add an image to the gallery |
+| `POST` | `/v1/ingest/pdf` | Render and ingest the pages of a PDF |
 | `POST` | `/v1/ingest/check` | Check SHA-256 and perceptual hashes before processing |
 | `POST` | `/v1/ingest/processed` | Store an image with client-computed faces and embeddings |
 | `POST` | `/v1/query/image` | Search every face found in an image |
@@ -463,6 +464,21 @@ The maximum request size is 20 MiB, and decoded images above 100 megapixels are
 rejected by default. Override the decoded-pixel ceiling with `--max-pixels` on
 both the CLI and server. JPEG, PNG, and WebP are recognized for stored MIME
 metadata, subject to the codecs available in OpenCV.
+
+PDF ingest accepts a raw or multipart PDF up to the same 20 MiB request limit.
+It uses Poppler to render at most 64 pages and ingests each page as an
+independent JPEG. For a one-page PDF containing one raster image, it extracts
+the original image, ignores sparse scanner noise while trimming whitespace,
+and probes all four orientations before ingest. `make setup` installs Poppler;
+installations assembled manually must provide `pdftoppm` and `pdfimages` on the
+server's `PATH`. The response reports `stored`, `no_face`, or `error` for each
+page:
+
+```bash
+curl --data-binary @photos.pdf \
+  -H 'Content-Type: application/pdf' \
+  http://127.0.0.1:8080/v1/ingest/pdf
+```
 
 Processed ingest requires multipart fields named `image` and `payload`. The
 JSON payload is versioned and has this shape:
