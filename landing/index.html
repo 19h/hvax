@@ -733,6 +733,8 @@
   let plimit = 24;
   let identityBrowse = false;
   let resultPeopleGeneration = 0;
+  const personStack = [];   // people visited before the one shown in #person
+  let currentPerson = null;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -957,7 +959,27 @@
     }));
   }
 
-  async function openPerson(id) {
+  function closePerson() {
+    const box = $("person");
+    box.hidden = true;
+    box.innerHTML = "";
+    personStack.length = 0;
+    currentPerson = null;
+    for (const el of $("pgrid").querySelectorAll(".pc")) el.classList.remove("on");
+    const target = $("rpeople") || (out.className ? out : null) || $("pgrid");
+    if (target) target.scrollIntoView({ block: "nearest" });
+  }
+
+  function personBack() {
+    if (personStack.length) openPerson(personStack.pop(), false);
+    else closePerson();
+  }
+
+  // "seen with" tiles open the next person on top of this one; back pops
+  // the stack and, at the bottom, returns to the search results.
+  async function openPerson(id, push) {
+    if (push !== false && currentPerson !== null && currentPerson !== id) personStack.push(currentPerson);
+    currentPerson = id;
     const box = $("person");
     box.hidden = false;
     box.innerHTML = "<div class='phead'><span>loading #" + esc(id) + "…</span></div>";
@@ -967,12 +989,15 @@
       api("/v1/identities/" + id + "/faces?limit=24"),
       api("/v1/identities/" + id + "/cooccurring?limit=12"),
     ]);
-    if (!p) { box.innerHTML = "<div class='phead err'><span>identity " + esc(id) + " not found</span></div>"; return; }
+    if (currentPerson !== id) return;
+    if (!p) { box.innerHTML = "<div class='phead err'><span>identity " + esc(id) + " not found</span></div><div class='phead'><span></span><span><button type='button' id='p-back'>← back</button></span></div>"; $("p-back").addEventListener("click", personBack); return; }
     for (const el of $("pgrid").querySelectorAll(".pc")) el.classList.toggle("on", Number(el.getAttribute("data-id")) === id);
     let html = "<div class='phead'><span>" + (identityBrowse
         ? "<input class='name' id='pname' placeholder='#" + esc(id) + "' value='" + esc(p.name || "") + "' aria-label='name'>"
         : "<strong>" + personLabel(p) + "</strong>")
-      + (p.pinned ? " · pinned" : "") + "</span><span><button type='button' id='p-find'>use as reference</button> · <button type='button' id='p-close'>close</button></span></div>";
+      + (p.pinned ? " · pinned" : "") + "</span><span>"
+      + "<button type='button' id='p-back'>← " + (personStack.length ? "#" + esc(personStack[personStack.length - 1]) : "results") + "</button> · "
+      + "<button type='button' id='p-find'>use as reference</button> · <button type='button' id='p-close'>close</button></span></div>";
     html += "<div class='kv'>"
       + row("identity", "#" + esc(p.identity_id))
       + row("faces", esc(p.size) + " in " + esc(p.n_images) + " image" + (p.n_images === 1 ? "" : "s"))
@@ -997,7 +1022,8 @@
     box.innerHTML = html;
     fillCrops(box);
     bindOpen(box, "#pco .pc");
-    $("p-close").addEventListener("click", () => { box.hidden = true; box.innerHTML = ""; });
+    $("p-close").addEventListener("click", closePerson);
+    $("p-back").addEventListener("click", personBack);
     $("p-find").addEventListener("click", () => {
       // the representative face joins the positive reference pool as a stored face
       setMode("query");
@@ -1614,6 +1640,7 @@
   }
 
   function clearSearch() {
+    if (currentPerson !== null) closePerson();
     activeSearch?.abort();
     activeSearch = null;
     if (resultThumbObserver) {
@@ -2050,6 +2077,9 @@
   });
   stage.addEventListener("drop", (e) => onFiles(e.dataTransfer.files));
   document.addEventListener("paste", onClipboardPaste);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("person").hidden && !pasteTargetIsTextField(e.target)) personBack();
+  });
   keyEl.addEventListener("input", () => {
     try { sessionStorage.setItem("hvax-key", keyEl.value); } catch (e) {}
     paintCurl();
