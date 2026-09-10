@@ -474,7 +474,7 @@ queries accept `X-K` values up to 256.
 | `GET` | `/v1/faces/:id` | Fetch face metadata, quality, and identity |
 | `GET` | `/v1/faces/:id?include_embedding=1` | Fetch face metadata and its embedding |
 | `GET` | `/v1/faces/:id/crop?size=160&pad=0.3` | JPEG crop of a face from its master image |
-| `GET` | `/v1/identities?sort=size\|recent\|id&offset&limit` | List people |
+| `GET` | `/v1/identities?sort=size\|recent\|id&offset&limit` | List people (`--identity-browse`) |
 | `GET` | `/v1/identities/:id` | One person with cohesion and top co-occurring people |
 | `GET` | `/v1/identities/:id/faces?sort=score\|time&offset&limit` | Faces of a person with cosine to the centroid |
 | `GET` | `/v1/identities/:id/cooccurring?limit` | People who share photos with this one |
@@ -610,6 +610,15 @@ times. hvax turns faces into people in two ways:
   ingest response carries `identity_id` per face, so a client knows immediately
   whether it just saw a known person.
 
+Listing people, curating them and triggering clustering over HTTP are
+opt-in: start `hvaxd --identity-browse` to enable `GET /v1/identities`,
+`POST /v1/identities/cluster`, merge/split/rename/delete and
+`GET /v1/eval/impostor`, and to show the people grid on the landing page.
+Without the flag those routes return `403` and the page hides the grid, while
+`GET /v1/identities/:id` (plus `/faces`, `/cooccurring`, `/timeline`) and face
+crops stay available so a person reached from a search hit can still be opened.
+`/v1/stats` reports the setting as `identity_browse`.
+
 Curation pins identities. A pinned identity's faces are fixed labels during
 clustering, two pinned identities are never merged automatically, and a pinned
 identity is never dissolved by the job. `PATCH` with a name pins as well.
@@ -704,6 +713,7 @@ risk of false positives.
 --cluster-merge F       centroid merge threshold             (default: 0.70)
 --cluster-neighbors N   kNN width for clustering             (default: 50)
 --cluster-interval S    recluster in the background every S s (default: off)
+--identity-browse       expose people listing, curation, cluster trigger (default: off)
 --reindex               recompute flags, requantise, rebuild HNSW; exit
 --cluster               run identity clustering once; exit
 --eval-impostor [N]     impostor evaluation over up to N pairs; exit

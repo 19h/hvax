@@ -43,6 +43,7 @@ void print_usage() {
       << "  --cluster-merge F       centroid merge threshold, default 0.70\n"
       << "  --cluster-neighbors N   kNN width for clustering, default 50\n"
       << "  --cluster-interval S    recluster in the background every S seconds, default off\n"
+      << "  --identity-browse       expose the people listing, curation and cluster trigger over HTTP\n"
       << "  --reindex               recompute quality flags, requantize int8, rebuild HNSW; exit\n"
       << "  --cluster               run identity clustering once; exit\n"
       << "  --eval-impostor [N]     print impostor-pair evaluation over up to N pairs; exit\n"
@@ -110,6 +111,7 @@ Config parse_args(int argc, char** argv) {
     else if (eq(argv[i], "--cluster-merge")) c.cluster_merge = std::stof(need("--cluster-merge"));
     else if (eq(argv[i], "--cluster-neighbors")) c.cluster_neighbors = std::stoi(need("--cluster-neighbors"));
     else if (eq(argv[i], "--cluster-interval")) c.cluster_interval_s = std::stoi(need("--cluster-interval"));
+    else if (eq(argv[i], "--identity-browse")) c.identity_browse = true;
     else if (eq(argv[i], "--reindex")) c.reindex = true;
     else if (eq(argv[i], "--cluster")) c.cluster_once = true;
     else if (eq(argv[i], "--eval-impostor")) {

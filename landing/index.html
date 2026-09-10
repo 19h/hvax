@@ -617,15 +617,15 @@
   <section class="refs" id="refs"></section>
   <section id="out"></section>
 
-  <section id="peoplesec">
+  <section id="peoplesec" hidden>
     <div class="phead">
       <h2>people</h2>
       <span><button type="button" id="p-size" class="on">by size</button> · <button type="button" id="p-recent">recent</button> · <button type="button" id="p-more">more</button></span>
     </div>
     <div class="people-grid" id="pgrid"></div>
     <p class="empty" id="pempty" hidden>no identities yet — run <code>hvaxd --cluster</code> or POST /v1/identities/cluster</p>
-    <div id="person" hidden></div>
   </section>
+  <section id="person" hidden></section>
 
   <section>
     <h2>endpoints</h2>
@@ -695,6 +695,7 @@
   const cropUrls = new Map();
   let psort = "size";
   let plimit = 24;
+  let identityBrowse = false;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -781,6 +782,12 @@
     $("n-embs").textContent = fmt(j.embedding_rows !== undefined ? j.embedding_rows : j.faces);
     $("n-ident").textContent = fmt(j.identities);
     $("n-index").textContent = j.hnsw ? "hnsw" : "exact";
+    const browse = Boolean(j.identity_browse);
+    if (browse !== identityBrowse) {
+      identityBrowse = browse;
+      $("peoplesec").hidden = !browse;
+      if (browse) loadPeople();
+    }
   }
 
   // ---- people (identity layer) ----
@@ -828,6 +835,7 @@
     } catch (e) { return null; }
   }
   async function loadPeople() {
+    if (!identityBrowse) return;
     const j = await api("/v1/identities?sort=" + psort + "&limit=" + plimit);
     const grid = $("pgrid");
     if (!j) { grid.innerHTML = ""; return; }
@@ -854,7 +862,9 @@
     ]);
     if (!p) { box.innerHTML = "<div class='phead err'><span>identity " + esc(id) + " not found</span></div>"; return; }
     for (const el of $("pgrid").querySelectorAll(".pc")) el.classList.toggle("on", Number(el.getAttribute("data-id")) === id);
-    let html = "<div class='phead'><span><input class='name' id='pname' placeholder='#" + esc(id) + "' value='" + esc(p.name || "") + "' aria-label='name'>"
+    let html = "<div class='phead'><span>" + (identityBrowse
+        ? "<input class='name' id='pname' placeholder='#" + esc(id) + "' value='" + esc(p.name || "") + "' aria-label='name'>"
+        : "<strong>" + personLabel(p) + "</strong>")
       + (p.pinned ? " · pinned" : "") + "</span><span><button type='button' id='p-find'>use as reference</button> · <button type='button' id='p-close'>close</button></span></div>";
     html += "<div class='kv'>"
       + row("identity", "#" + esc(p.identity_id))
@@ -887,11 +897,13 @@
       setFeedback(Number(p.rep_face_id), "positive", { image_id: null, identity_id: id });
       $("apply").scrollIntoView({ block: "nearest" });
     });
-    $("pname").addEventListener("change", async () => {
-      const name = $("pname").value.trim();
-      await api("/v1/identities/" + id, { method: "PATCH", headers: Object.assign({ "Content-Type": "application/json" }, keyHdr()), body: JSON.stringify({ name }) });
-      loadPeople();
-    });
+    if ($("pname")) {
+      $("pname").addEventListener("change", async () => {
+        const name = $("pname").value.trim();
+        await api("/v1/identities/" + id, { method: "PATCH", headers: Object.assign({ "Content-Type": "application/json" }, keyHdr()), body: JSON.stringify({ name }) });
+        loadPeople();
+      });
+    }
   }
 
   function loadImg(file) {
@@ -1982,7 +1994,6 @@
   setMode("query");
   paintCurl();
   refresh();
-  loadPeople();
   setInterval(refresh, 4000);
 })();
 </script>

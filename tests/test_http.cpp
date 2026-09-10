@@ -165,6 +165,7 @@ TEST(HttpApi, IdentityRoutesEndToEnd) {
   hvax::Config cfg;
   cfg.data_dir = dir.string();
   cfg.api_key = "secret";
+  cfg.identity_browse = true;
   cfg.dedup = hvax::DedupMode::sha256;  // fixture photos are near-identical; this test is about identities
   hvax::Engine engine(cfg);
   for (int i = 0; i < 3; ++i) {
@@ -374,4 +375,39 @@ TEST(HttpHelpers, FullBleedPdfPageIsNotTrimmed) {
 
   EXPECT_FALSE(hvax::trim_pdf_white_margins(encoded, 1'000'000));
   EXPECT_EQ(encoded, original);
+}
+
+TEST(HttpApi, IdentityBrowsingIsOptIn) {
+  auto dir = http_tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.dedup = hvax::DedupMode::sha256;
+  hvax::Engine engine(cfg);
+  for (int i = 0; i < 3; ++i) ingest(engine, 10 + i, {face_at(person_embedding(1, i), 10, 10, 200)});
+  ASSERT_TRUE(engine.recluster().has_value());
+  LiveServer live(engine);
+  auto c = live.client();
+  // enumeration, curation, clustering and evaluation are refused ...
+  EXPECT_EQ(c.Get("/v1/identities")->status, 403);
+  EXPECT_EQ(c.Post("/v1/identities/cluster", "", "application/json")->status, 403);
+  EXPECT_EQ(c.Post("/v1/identities/merge", "{\"ids\":[0,1]}", "application/json")->status, 403);
+  EXPECT_EQ(c.Patch("/v1/identities/0", "{\"name\":\"x\"}", "application/json")->status, 403);
+  EXPECT_EQ(c.Delete("/v1/identities/0")->status, 403);
+  EXPECT_EQ(c.Get("/v1/eval/impostor?pairs=10")->status, 403);
+  // ... while looking up a person reached from a hit still works
+  const int64_t id = engine.get_face(0).identity_id;
+  ASSERT_GE(id, 0);
+  auto d = c.Get("/v1/identities/" + std::to_string(id));
+  ASSERT_EQ(d->status, 200);
+  EXPECT_EQ(nlohmann::json::parse(d->body)["size"], 3);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/faces")->status, 200);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/cooccurring")->status, 200);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/timeline")->status, 200);
+  EXPECT_EQ(c.Get("/v1/faces/0/crop?size=32")->status, 200);
+  auto st = nlohmann::json::parse(c.Get("/v1/stats")->body);
+  EXPECT_FALSE(st["identity_browse"].get<bool>());
+  EXPECT_EQ(st["identities"], 1);
+  auto plain = c.Get("/");
+  EXPECT_EQ(plain->body.find("GET    /v1/identities\n"), std::string::npos);
+  std::filesystem::remove_all(dir);
 }

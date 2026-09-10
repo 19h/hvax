@@ -48,6 +48,10 @@ struct Config {
   float cluster_merge = kIdentityMergeCosine;
   int cluster_neighbors = kClusterNeighbors;
   int cluster_interval_s = 0;  // 0 = no background reclustering
+  // Enumerating people (GET /v1/identities), triggering clustering over HTTP
+  // and curating identities are off unless explicitly enabled. Looking up a
+  // person reached from a search hit stays available either way.
+  bool identity_browse = false;
 
   // One-shot maintenance modes; the daemon exits after running them.
   bool reindex = false;

@@ -606,6 +606,7 @@ nlohmann::json stats_json(const Engine& engine) {
           {"clustering", g.clustering()},
           {"hnsw", g.hnsw_active()},
           {"jobs", engine.config().http_threads},
+          {"identity_browse", engine.config().identity_browse},
           {"i8_kernel", i8_kernel_name()},
           {"index_min_face_px", engine.config().index_min_face_px},
           {"index_min_det", engine.config().index_min_det},
@@ -620,11 +621,14 @@ bool trim_pdf_white_margins(std::vector<uint8_t>& bytes, int64_t max_pixels) {
 }
 
 void register_routes(Engine& engine, httplib::Server& svr) {
+  // `cfg` refers to Engine's own Config, which outlives every handler.
   const Config& cfg = engine.config();
   svr.set_payload_max_length(cfg.max_upload + kMaxProcessedJson + kMultipartOverhead);
 
-  auto auth = [&](const httplib::Request& req, httplib::Response& res) {
-    if (check_key(req, cfg)) return true;
+  // Handlers outlive this function: capture only `engine` (owned by main) and
+  // copy the helper lambdas by value, never the locals by reference.
+  auto auth = [&engine](const httplib::Request& req, httplib::Response& res) {
+    if (check_key(req, engine.config())) return true;
     res.status = 401;
     res.set_content("{\"error\":\"unauthorized\"}", "application/json");
     return false;
@@ -636,6 +640,15 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     res.set_header("Expires", "0");
   };
 
+  // Listing, curating and reclustering people is opt-in (--identity-browse);
+  // a public gallery only answers lookups for a person reached from a hit.
+  auto browse = [&engine, auth](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return false;
+    if (engine.config().identity_browse) return true;
+    json_error(res, 403, "identity browsing is disabled on this server");
+    return false;
+  };
+
   auto wants_html = [](const httplib::Request& req) {
     const auto acc = req.get_header_value("Accept");
     if (acc.find("text/html") != std::string::npos) return true;
@@ -643,7 +656,8 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     return ua.find("Mozilla") != std::string::npos;
   };
 
-  auto landing_plain = [&](const httplib::Request& req) {
+  auto landing_plain = [&engine](const httplib::Request& req) {
+    const Config& cfg = engine.config();
     const auto& g = engine.gallery();
     std::string host = req.get_header_value("Host");
     if (host.empty()) host = cfg.bind + ":" + std::to_string(cfg.port);
@@ -667,7 +681,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       << "POST   /v1/query/image            (X-Mode: faces|range|identity, X-Group-By: identity)\n"
       << "POST   /v1/query/embedding\n"
       << "POST   /v1/query/template\n"
-      << "GET    /v1/identities\n"
+      << (cfg.identity_browse ? "GET    /v1/identities\n" : "")
       << "GET    /v1/identities/:id\n"
       << "GET    /v1/identities/:id/faces\n"
       << "GET    /v1/identities/:id/cooccurring\n"
@@ -1062,8 +1076,8 @@ void register_routes(Engine& engine, httplib::Server& svr) {
 
   // ---- identities ----
 
-  svr.Get("/v1/identities", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Get("/v1/identities", [&, browse, no_store](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     no_store(res);
     IdentitySort sort = IdentitySort::size;
     const std::string s = lower(req.get_param_value("sort"));
@@ -1082,15 +1096,15 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                     "application/json");
   });
 
-  svr.Post("/v1/identities/cluster", [&, auth](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Post("/v1/identities/cluster", [&, browse](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     auto r = engine.recluster();
     if (!r) return json_error(res, 409, "clustering already running");
     res.set_content(cluster_report_json(*r).dump(), "application/json");
   });
 
-  svr.Post("/v1/identities/merge", [&, auth](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Post("/v1/identities/merge", [&, browse](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     std::vector<int64_t> ids;
     try {
       auto j = nlohmann::json::parse(req.body);
@@ -1177,8 +1191,8 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                     "application/json");
   });
 
-  svr.Post(R"(/v1/identities/(\d+)/split)", [&, auth](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Post(R"(/v1/identities/(\d+)/split)", [&, browse](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     const int64_t id = std::stoll(req.matches[1]);
     std::vector<int64_t> faces;
     try {
@@ -1197,8 +1211,8 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                     "application/json");
   });
 
-  svr.Patch(R"(/v1/identities/(\d+))", [&, auth](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Patch(R"(/v1/identities/(\d+))", [&, browse](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     const int64_t id = std::stoll(req.matches[1]);
     try {
       auto j = nlohmann::json::parse(req.body);
@@ -1217,15 +1231,15 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     res.set_content(identity_json(*v).dump(), "application/json");
   });
 
-  svr.Delete(R"(/v1/identities/(\d+))", [&, auth](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Delete(R"(/v1/identities/(\d+))", [&, browse](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     const int64_t id = std::stoll(req.matches[1]);
     if (!engine.gallery().dissolve_identity(id)) return json_error(res, 404, "not found");
     res.status = 204;
   });
 
-  svr.Get("/v1/eval/impostor", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
-    if (!auth(req, res)) return;
+  svr.Get("/v1/eval/impostor", [&, browse, no_store](const httplib::Request& req, httplib::Response& res) {
+    if (!browse(req, res)) return;
     no_store(res);
     const uint64_t pairs = param_u64(req, "pairs", 100000, 5000000);
     const uint64_t seed = param_u64(req, "seed", 1, UINT64_MAX);
