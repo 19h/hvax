@@ -692,7 +692,7 @@ ReindexReport Gallery::reindex() {
 std::vector<Hit> Gallery::search_template(std::span<const Embedding> positives,
                                           std::span<const Embedding> negatives,
                                           std::span<const int64_t> excluded_image_ids, int k,
-                                          float min_score) const {
+                                          float min_score, bool include_hidden) const {
   if (positives.empty() || k <= 0) return {};
 
   std::shared_lock lock(mu_);
@@ -735,7 +735,7 @@ std::vector<Hit> Gallery::search_template(std::span<const Embedding> positives,
     const auto& face = faces_.at(row);
     // Low-quality and hidden faces never surface in template results.
     if (!face_indexable(face.flags) || excluded_images.contains(face.image_id)) return;
-    if (row_hidden_locked(row)) return;
+    if (!include_hidden && row_hidden_locked(row)) return;
     if (face.image_id == 0 || face.image_id > images_.size()) return;
     const auto& image = images_.at(face.image_id - 1);
     if (!slot_live(image.flags)) return;
@@ -781,7 +781,7 @@ std::vector<Hit> Gallery::search_template(std::span<const Embedding> positives,
     return a.row < b.row;
   });
   if (ranked.size() > static_cast<size_t>(k)) ranked.resize(static_cast<size_t>(k));
-  return hydrate(ranked);
+  return hydrate(ranked, include_hidden);
 }
 
 uint64_t Gallery::live_faces() const {

@@ -975,7 +975,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     res.set_content(nlohmann::json{{"results", arr}}.dump(), "application/json");
   });
 
-  svr.Post("/v1/query/template", [&, auth](const httplib::Request& req, httplib::Response& res) {
+  svr.Post("/v1/query/template", [&, auth, keyed](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
       const auto payload = nlohmann::json::parse(req.body);
@@ -1010,7 +1010,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       if (k > kMaxTemplateResults || !std::isfinite(min_s))
         return json_error(res, 422, "X-K must be at most 256 and X-Min-Score must be finite");
       auto hits = engine.query_template(positive_embeddings, positive_face_ids, negative_embeddings,
-                                        negative_face_ids, k, min_s);
+                                        negative_face_ids, k, min_s, keyed(req));
       nlohmann::json result = nlohmann::json::array();
       for (const auto& hit : hits) result.push_back(hit_json(hit));
       res.set_content(nlohmann::json{{"hits", result}}.dump(), "application/json");

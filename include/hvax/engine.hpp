@@ -65,7 +65,8 @@ class Engine {
   std::vector<Hit> query_template(std::span<const Embedding> positive_embeddings,
                                   std::span<const int64_t> positive_face_ids,
                                   std::span<const Embedding> negative_embeddings,
-                                  std::span<const int64_t> negative_face_ids, int k, float min_score);
+                                  std::span<const int64_t> negative_face_ids, int k, float min_score,
+                                  bool include_hidden = false);
 
   ImageView get_image(int64_t id) const { return gallery_->image(id); }
   ImageView get_image(const std::array<uint8_t, 32>& sha) const;

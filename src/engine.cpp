@@ -438,7 +438,7 @@ std::vector<Hit> Engine::query_template(std::span<const Embedding> positive_embe
                                         std::span<const int64_t> positive_face_ids,
                                         std::span<const Embedding> negative_embeddings,
                                         std::span<const int64_t> negative_face_ids, int k,
-                                        float min_score) {
+                                        float min_score, bool include_hidden) {
   metrics_.query_template.fetch_add(1, std::memory_order_relaxed);
   const auto started = std::chrono::steady_clock::now();
 
@@ -472,7 +472,7 @@ std::vector<Hit> Engine::query_template(std::span<const Embedding> positive_embe
   if (positives.empty()) throw std::invalid_argument("at least one positive reference is required");
   if (k <= 0) k = cfg_.default_k;
 
-  auto hits = gallery_->search_template(positives, negatives, excluded_image_ids, k, min_score);
+  auto hits = gallery_->search_template(positives, negatives, excluded_image_ids, k, min_score, include_hidden);
   const auto elapsed =
       std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
   metrics_.query_us_sum.fetch_add(static_cast<uint64_t>(elapsed), std::memory_order_relaxed);

@@ -469,6 +469,10 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   bool saw = false;
   for (auto& hit : qa["hits"]) if (hit["identity_id"] == id_b) { saw = true; EXPECT_TRUE(hit["hidden"].get<bool>()); }
   EXPECT_TRUE(saw);
+  auto ta = nlohmann::json::parse(c.Post("/v1/query/template", hk, nlohmann::json{{"positive_embeddings", {std::vector<float>(person_embedding(2, 0).begin(), person_embedding(2, 0).end())}}}.dump(), "application/json")->body);
+  bool saw_t = false;
+  for (auto& hit : ta["hits"]) if (hit["identity_id"] == id_b) { saw_t = true; EXPECT_TRUE(hit["hidden"].get<bool>()); }
+  EXPECT_TRUE(saw_t) << "keyed template search shows hidden faces";
   EXPECT_EQ(nlohmann::json::parse(c.Get("/v1/images/" + hvax::to_hex(im.sha256) + "/meta", key)->body)["face_ids"].size(), 2u);
   EXPECT_NE(c.Get("/metrics")->body.find("hvax_identities_hidden 1"), std::string::npos);
   // unhide

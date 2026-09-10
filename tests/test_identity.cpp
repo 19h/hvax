@@ -504,6 +504,8 @@ TEST(Identity, HiddenIdentitiesAreSuppressedEverywhere) {
   // template search skips hidden faces too
   std::array<hvax::Embedding, 1> pos{person_embedding(2, 2)};
   for (auto& h : g.search_template(pos, {}, {}, 10, -1.f)) EXPECT_NE(h.identity_id, id_b);
+  auto tpl_admin = g.search_template(pos, {}, {}, 10, -1.f, true);
+  EXPECT_TRUE(std::any_of(tpl_admin.begin(), tpl_admin.end(), [&](auto& h) { return h.identity_id == id_b && h.hidden; }));
   // a new face of the hidden person joins it and is suppressed immediately
   insert_image(g, 60, {face_at(person_embedding(2, 40), 10, 10, 200)});
   EXPECT_EQ(g.face(8).identity_id, id_b);
