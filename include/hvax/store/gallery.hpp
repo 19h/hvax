@@ -54,6 +54,8 @@ struct SearchOptions {
   bool range = false;
   // Collapse hits to the best face per identity; k then counts groups.
   bool group_by_identity = false;
+  // Faces of hidden identities are dropped unless this is set (admins only).
+  bool include_hidden = false;
 };
 
 enum class IdentitySort { size, recent, id };
@@ -153,14 +155,24 @@ class Gallery {
   std::vector<std::vector<Hit>> search_batch(const float* queries, int nq, const SearchOptions& opts) const;
 
   // ---- identities ----
-  std::vector<IdentityHit> search_identities(const float* query, int k, float min_score) const;
-  std::optional<IdentityView> identity(int64_t identity_id) const;
-  std::vector<IdentityView> list_identities(IdentitySort sort, uint64_t offset, uint64_t limit) const;
+  std::vector<IdentityHit> search_identities(const float* query, int k, float min_score,
+                                             bool include_hidden = false) const;
+  std::optional<IdentityView> identity(int64_t identity_id, bool include_hidden = false) const;
+  std::vector<IdentityView> list_identities(IdentitySort sort, uint64_t offset, uint64_t limit,
+                                            bool include_hidden = false) const;
   std::vector<FaceView> identity_faces(int64_t identity_id, FaceSort sort, uint64_t offset, uint64_t limit,
-                                       std::vector<float>* scores = nullptr) const;
-  std::vector<CooccurrenceEntry> cooccurring(int64_t identity_id, uint64_t limit) const;
-  std::vector<TimelineBucket> timeline(int64_t identity_id, int64_t bucket_ms) const;
+                                       std::vector<float>* scores = nullptr, bool include_hidden = false) const;
+  std::vector<CooccurrenceEntry> cooccurring(int64_t identity_id, uint64_t limit, bool include_hidden = false) const;
+  std::vector<TimelineBucket> timeline(int64_t identity_id, int64_t bucket_ms, bool include_hidden = false) const;
   bool identity_centroid(int64_t identity_id, Embedding& out) const;
+
+  // Hiding: the identity's faces stop surfacing anywhere for non-admin
+  // requests. Hiding also pins the identity so the cluster job keeps it.
+  bool set_identity_hidden(int64_t identity_id, bool hidden);
+  bool identity_hidden(int64_t identity_id) const;
+  bool face_hidden(int64_t face_id) const;
+  std::vector<IdentityView> hidden_identities() const;
+  uint64_t hidden_identity_count() const;
 
   // Curation. All of these pin the identities they touch.
   std::optional<int64_t> merge_identities(const std::vector<int64_t>& ids);
@@ -206,8 +218,9 @@ class Gallery {
   void unlink_master(const std::array<uint8_t, 32>& sha);
   void rebuild_maps();
   void ensure_i8_version();
-  std::vector<Hit> hydrate(const std::vector<ScanHit>& rows) const;
-  Hit hydrate_one(uint64_t row, float score, bool& ok) const;
+  std::vector<Hit> hydrate(const std::vector<ScanHit>& rows, bool include_hidden = false) const;
+  Hit hydrate_one(uint64_t row, float score, bool& ok, bool include_hidden = false) const;
+  bool row_hidden_locked(uint64_t row) const;
   std::vector<ScanHit> candidates_locked(const float* query, int want, float min_score, bool include_low_quality,
                                          bool range) const;
   std::vector<Hit> search_locked(const float* query, const SearchOptions& opts) const;
@@ -247,6 +260,8 @@ class Gallery {
   std::vector<float> centroid_norm_;                  // identity_rows * kDim, L2-normalized
   std::vector<std::vector<uint32_t>> members_;        // identity -> live face rows
   std::vector<std::vector<uint32_t>> image_faces_;    // image idx -> live face rows
+  std::vector<uint8_t> hidden_;                       // per identity: kIdentityHidden mirror
+  uint64_t hidden_count_ = 0;
   std::atomic<bool> clustering_{false};
   std::mutex cluster_mu_;
 };

@@ -65,6 +65,7 @@ nlohmann::json face_json(const FaceView& f) {
           {"quality", f.quality},
           {"low_quality", (f.flags & kLowQuality) != 0},
           {"identity_id", identity_ref_json(f.identity_id)},
+          {"hidden", f.hidden},
           {"created_at", f.created_at}};
 }
 
@@ -78,6 +79,7 @@ nlohmann::json hit_json(const Hit& h) {
                       {"quality", h.quality},
                       {"low_quality", (h.flags & kLowQuality) != 0},
                       {"identity_id", identity_ref_json(h.identity_id)}};
+  if (h.hidden) j["hidden"] = true;
   if (h.collapsed > 0) j["collapsed"] = h.collapsed;
   return j;
 }
@@ -89,6 +91,7 @@ nlohmann::json identity_json(const IdentityView& v) {
           {"rep_face_id", v.rep_face_id},
           {"name", v.name},
           {"pinned", (v.flags & kIdentityPinned) != 0},
+          {"hidden", (v.flags & kIdentityHidden) != 0},
           {"cohesion", v.cohesion},
           {"first_seen", v.first_seen},
           {"last_seen", v.last_seen},
@@ -468,8 +471,17 @@ struct QueryOpts {
   bool identity_mode = false;
 };
 
+// The identity-management key may arrive as X-Identity-Key or in the generic
+// X-API-Key slot the landing page fills from its key field.
+bool identity_keyed(const httplib::Request& req, const Config& cfg) {
+  if (cfg.identity_key.empty()) return false;
+  return req.get_header_value("X-Identity-Key") == cfg.identity_key ||
+         req.get_header_value("X-API-Key") == cfg.identity_key;
+}
+
 QueryOpts query_opts(const httplib::Request& req, const Config& cfg) {
   QueryOpts q;
+  q.search.include_hidden = identity_keyed(req, cfg);
   q.search.k = header_int(req, "X-K", cfg.default_k);
   q.search.min_score = header_float(req, "X-Min-Score", cfg.default_min_score);
   q.search.include_low_quality = header_flag(req, "X-Include-Low-Quality");
@@ -593,9 +605,12 @@ bool parse_face_ids(const nlohmann::json& root, const char* name, std::vector<in
   return true;
 }
 
-nlohmann::json stats_json(const Engine& engine) {
+nlohmann::json stats_json(const Engine& engine, bool keyed) {
   const auto& g = engine.gallery();
   return {{"faces", g.live_faces()},
+          {"hidden_identities", g.hidden_identity_count()},
+          {"identity_key_ok", keyed},
+          {"identity_key_configured", !engine.config().identity_key.empty()},
           {"images", g.live_images()},
           {"embedding_rows", g.embedding_rows()},
           {"indexed_faces", g.indexed_faces()},
@@ -642,6 +657,17 @@ void register_routes(Engine& engine, httplib::Server& svr) {
 
   // Listing, curating and reclustering people is opt-in (--identity-browse);
   // a public gallery only answers lookups for a person reached from a hit.
+  // Hiding people needs the identity-management key (--identity-key).
+  auto admin = [&engine, auth](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return false;
+    if (identity_keyed(req, engine.config())) return true;
+    json_error(res, engine.config().identity_key.empty() ? 403 : 401,
+               engine.config().identity_key.empty() ? "no identity-management key is configured on this server"
+                                                    : "identity-management key required");
+    return false;
+  };
+  auto keyed = [&engine](const httplib::Request& req) { return identity_keyed(req, engine.config()); };
+
   auto browse = [&engine, auth](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return false;
     if (engine.config().identity_browse) return true;
@@ -722,7 +748,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
   svr.Get("/v1/stats", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
     no_store(res);
     if (!auth(req, res)) return;
-    res.set_content(stats_json(engine).dump(), "application/json");
+    res.set_content(stats_json(engine, identity_keyed(req, cfg)).dump(), "application/json");
   });
 
   svr.Post("/v1/ingest", [&, auth](const httplib::Request& req, httplib::Response& res) {
@@ -917,7 +943,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     auto e = parse_embedding_body(req);
     if (!e) return json_error(res, 400, "embedding must be 512 floats");
     if (q.identity_mode) {
-      auto hits = engine.query_embedding_identities(*e, q.search.k, q.search.min_score);
+      auto hits = engine.query_embedding_identities(*e, q.search.k, q.search.min_score, q.search.include_hidden);
       nlohmann::json arr = nlohmann::json::array();
       for (auto& h : hits) arr.push_back(identity_hit_json(h));
       res.set_content(nlohmann::json{{"identities", arr}}.dump(), "application/json");
@@ -1004,7 +1030,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     const bool include_embedding = query_flag(req, "include_embedding");
     nlohmann::json queries = nlohmann::json::array();
     if (q.identity_mode && !detect_only) {
-      auto groups = engine.query_image_identities(bytes, q.search.k, q.search.min_score);
+      auto groups = engine.query_image_identities(bytes, q.search.k, q.search.min_score, q.search.include_hidden);
       if (groups.empty()) {
         res.status = 204;
         return;
@@ -1035,7 +1061,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
 
   // ---- faces ----
 
-  svr.Get(R"(/v1/faces/(\d+)/crop)", [&, auth](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/faces/(\d+)/crop)", [&, auth, keyed](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     CropOptions opts;
     opts.size = static_cast<int>(param_u64(req, "size", static_cast<uint64_t>(opts.size), 1024));
@@ -1052,17 +1078,20 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       id = std::stoll(req.matches[1]);
     } catch (...) {
     }
-    if (id < 0 || !engine.face_crop(id, opts, jpeg)) return json_error(res, 404, "not found");
+    if (id < 0 || (engine.gallery().face_hidden(id) && !keyed(req)) || !engine.face_crop(id, opts, jpeg))
+      return json_error(res, 404, "not found");
     // A face crop only changes when its master is replaced; allow client caching.
     res.set_header("Cache-Control", "private, max-age=86400");
     res.set_content(std::string(jpeg.begin(), jpeg.end()), "image/jpeg");
   });
 
-  svr.Get(R"(/v1/faces/(\d+))", [&, auth](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/faces/(\d+))", [&, auth, keyed](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
       const int64_t id = std::stoll(req.matches[1]);
       auto f = engine.get_face(id);
+      f.hidden = engine.gallery().face_hidden(id);
+      if (f.hidden && !keyed(req)) throw std::runtime_error("hidden");
       auto j = face_json(f);
       if (req.has_param("include_embedding")) {
         Embedding e{};
@@ -1076,7 +1105,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
 
   // ---- identities ----
 
-  svr.Get("/v1/identities", [&, browse, no_store](const httplib::Request& req, httplib::Response& res) {
+  svr.Get("/v1/identities", [&, browse, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
     if (!browse(req, res)) return;
     no_store(res);
     IdentitySort sort = IdentitySort::size;
@@ -1085,7 +1114,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     else if (s == "id") sort = IdentitySort::id;
     const uint64_t offset = param_u64(req, "offset", 0, UINT64_MAX);
     const uint64_t limit = param_u64(req, "limit", 50, kMaxPageLimit);
-    auto list = engine.gallery().list_identities(sort, offset, limit);
+    auto list = engine.gallery().list_identities(sort, offset, limit, keyed(req));
     nlohmann::json arr = nlohmann::json::array();
     for (auto& v : list) arr.push_back(identity_json(v));
     res.set_content(nlohmann::json{{"identities", arr},
@@ -1119,30 +1148,54 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                     "application/json");
   });
 
-  svr.Get(R"(/v1/identities/(\d+))", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
+  svr.Get("/v1/identities/hidden", [&, admin, no_store](const httplib::Request& req, httplib::Response& res) {
+    if (!admin(req, res)) return;
+    no_store(res);
+    nlohmann::json arr = nlohmann::json::array();
+    for (auto& v : engine.gallery().hidden_identities()) arr.push_back(identity_json(v));
+    res.set_content(nlohmann::json{{"identities", arr}, {"total", arr.size()}}.dump(), "application/json");
+  });
+
+  svr.Post(R"(/v1/identities/(\d+)/hide)", [&, admin](const httplib::Request& req, httplib::Response& res) {
+    if (!admin(req, res)) return;
+    const int64_t id = std::stoll(req.matches[1]);
+    if (!engine.gallery().set_identity_hidden(id, true)) return json_error(res, 404, "not found");
+    auto v = engine.gallery().identity(id, true);
+    res.set_content(v ? identity_json(*v).dump() : "{}", "application/json");
+  });
+
+  svr.Post(R"(/v1/identities/(\d+)/unhide)", [&, admin](const httplib::Request& req, httplib::Response& res) {
+    if (!admin(req, res)) return;
+    const int64_t id = std::stoll(req.matches[1]);
+    if (!engine.gallery().set_identity_hidden(id, false)) return json_error(res, 404, "not found");
+    auto v = engine.gallery().identity(id, true);
+    res.set_content(v ? identity_json(*v).dump() : "{}", "application/json");
+  });
+
+  svr.Get(R"(/v1/identities/(\d+))", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     no_store(res);
     const int64_t id = std::stoll(req.matches[1]);
-    auto v = engine.gallery().identity(id);
+    auto v = engine.gallery().identity(id, keyed(req));
     if (!v) return json_error(res, 404, "not found");
     auto j = identity_json(*v);
     nlohmann::json co = nlohmann::json::array();
-    for (auto& c : engine.gallery().cooccurring(id, 10))
+    for (auto& c : engine.gallery().cooccurring(id, 10, keyed(req)))
       co.push_back({{"identity_id", c.identity_id}, {"shared_images", c.shared_images}});
     j["cooccurring"] = co;
     res.set_content(j.dump(), "application/json");
   });
 
-  svr.Get(R"(/v1/identities/(\d+)/faces)", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/identities/(\d+)/faces)", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     no_store(res);
     const int64_t id = std::stoll(req.matches[1]);
-    if (!engine.gallery().identity(id)) return json_error(res, 404, "not found");
+    if (!engine.gallery().identity(id, keyed(req))) return json_error(res, 404, "not found");
     const FaceSort sort = lower(req.get_param_value("sort")) == "time" ? FaceSort::time : FaceSort::score;
     const uint64_t offset = param_u64(req, "offset", 0, UINT64_MAX);
     const uint64_t limit = param_u64(req, "limit", 50, kMaxPageLimit);
     std::vector<float> scores;
-    auto faces = engine.gallery().identity_faces(id, sort, offset, limit, &scores);
+    auto faces = engine.gallery().identity_faces(id, sort, offset, limit, &scores, keyed(req));
     nlohmann::json arr = nlohmann::json::array();
     for (size_t i = 0; i < faces.size(); ++i) {
       auto j = face_json(faces[i]);
@@ -1157,16 +1210,16 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                     "application/json");
   });
 
-  svr.Get(R"(/v1/identities/(\d+)/cooccurring)", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/identities/(\d+)/cooccurring)", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     no_store(res);
     const int64_t id = std::stoll(req.matches[1]);
-    if (!engine.gallery().identity(id)) return json_error(res, 404, "not found");
+    if (!engine.gallery().identity(id, keyed(req))) return json_error(res, 404, "not found");
     const uint64_t limit = param_u64(req, "limit", 50, kMaxPageLimit);
     nlohmann::json arr = nlohmann::json::array();
-    for (auto& c : engine.gallery().cooccurring(id, limit)) {
+    for (auto& c : engine.gallery().cooccurring(id, limit, keyed(req))) {
       nlohmann::json j = {{"identity_id", c.identity_id}, {"shared_images", c.shared_images}};
-      if (auto v = engine.gallery().identity(c.identity_id)) {
+      if (auto v = engine.gallery().identity(c.identity_id, keyed(req))) {
         j["size"] = v->size;
         j["rep_face_id"] = v->rep_face_id;
         j["name"] = v->name;
@@ -1176,17 +1229,17 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     res.set_content(nlohmann::json{{"identity_id", id}, {"cooccurring", arr}}.dump(), "application/json");
   });
 
-  svr.Get(R"(/v1/identities/(\d+)/timeline)", [&, auth, no_store](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/identities/(\d+)/timeline)", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     no_store(res);
     const int64_t id = std::stoll(req.matches[1]);
-    if (!engine.gallery().identity(id)) return json_error(res, 404, "not found");
+    if (!engine.gallery().identity(id, keyed(req))) return json_error(res, 404, "not found");
     const std::string b = lower(req.get_param_value("bucket"));
     int64_t bucket_ms = 86400000;
     if (b == "hour") bucket_ms = 3600000;
     else if (b == "week") bucket_ms = 7 * 86400000LL;
     nlohmann::json arr = nlohmann::json::array();
-    for (auto& t : engine.gallery().timeline(id, bucket_ms)) arr.push_back({{"start_ms", t.start_ms}, {"faces", t.faces}});
+    for (auto& t : engine.gallery().timeline(id, bucket_ms, keyed(req))) arr.push_back({{"start_ms", t.start_ms}, {"faces", t.faces}});
     res.set_content(nlohmann::json{{"identity_id", id}, {"bucket_ms", bucket_ms}, {"buckets", arr}}.dump(),
                     "application/json");
   });
@@ -1248,20 +1301,26 @@ void register_routes(Engine& engine, httplib::Server& svr) {
 
   // ---- images ----
 
-  svr.Get(R"(/v1/images/([0-9a-fA-F]{64})/meta)", [&, auth](const httplib::Request& req, httplib::Response& res) {
+  svr.Get(R"(/v1/images/([0-9a-fA-F]{64})/meta)", [&, auth, keyed](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     try {
       std::array<uint8_t, 32> sha{};
       if (!sha256_from_string(req.matches[1].str(), sha)) throw std::runtime_error("bad image hash");
       auto im = engine.get_image(sha);
+      const bool admin_view = keyed(req);
+      std::vector<int64_t> face_ids, identities;
+      for (int64_t fid : im.face_ids)
+        if (admin_view || !engine.gallery().face_hidden(fid)) face_ids.push_back(fid);
+      for (int64_t iid : engine.gallery().identities_of(im.image_id))
+        if (admin_view || !engine.gallery().identity_hidden(iid)) identities.push_back(iid);
       nlohmann::json j = {{"image_id", im.image_id},
                           {"sha256", to_hex(im.sha256)},
                           {"width", im.width},
                           {"height", im.height},
                           {"mime", engine.image_mime(sha)},
                           {"nbytes", im.nbytes},
-                          {"face_ids", im.face_ids},
-                          {"identities", engine.gallery().identities_of(im.image_id)},
+                          {"face_ids", face_ids},
+                          {"identities", identities},
                           {"repeat_identity", (im.flags & kImageRepeatIdentity) != 0},
                           {"created_at", im.created_at}};
       res.set_content(j.dump(), "application/json");

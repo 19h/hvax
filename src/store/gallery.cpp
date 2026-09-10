@@ -480,12 +480,20 @@ bool Gallery::remove_image(int64_t image_id) {
   return true;
 }
 
-Hit Gallery::hydrate_one(uint64_t row, float score, bool& ok) const {
+bool Gallery::row_hidden_locked(uint64_t row) const {
+  if (hidden_count_ == 0 || row >= faces_.size()) return false;
+  const int64_t id = identity_of(faces_.at(row));
+  return id >= 0 && static_cast<uint64_t>(id) < hidden_.size() && hidden_[static_cast<size_t>(id)];
+}
+
+Hit Gallery::hydrate_one(uint64_t row, float score, bool& ok, bool include_hidden) const {
   Hit h;
   ok = false;
   if (row >= faces_.size()) return h;
   const auto& s = faces_.at(row);
   if (!slot_live(s.flags)) return h;
+  const bool hidden = row_hidden_locked(row);
+  if (hidden && !include_hidden) return h;
   if (s.image_id == 0 || s.image_id > images_.size()) return h;
   const auto& image = images_.at(s.image_id - 1);
   if (!slot_live(image.flags)) return h;
@@ -499,16 +507,17 @@ Hit Gallery::hydrate_one(uint64_t row, float score, bool& ok) const {
   h.quality = face_quality(s.det_score, h.box);
   h.flags = s.flags;
   h.identity_id = identity_of(s);
+  h.hidden = hidden;
   ok = true;
   return h;
 }
 
-std::vector<Hit> Gallery::hydrate(const std::vector<ScanHit>& rows) const {
+std::vector<Hit> Gallery::hydrate(const std::vector<ScanHit>& rows, bool include_hidden) const {
   std::vector<Hit> out;
   out.reserve(rows.size());
   for (const auto& r : rows) {
     bool ok = false;
-    Hit h = hydrate_one(r.row, r.score, ok);
+    Hit h = hydrate_one(r.row, r.score, ok, include_hidden);
     if (ok) out.push_back(h);
   }
   return out;
@@ -597,7 +606,11 @@ std::vector<Hit> Gallery::search_locked(const float* query, const SearchOptions&
   int want = k;
   if (opts.range) want = std::max(cfg_.max_range, k);
   else if (opts.group_by_identity) want = std::max(k * 8, 64);
-  auto hits = hydrate(candidates_locked(query, want, opts.min_score, opts.include_low_quality, opts.range));
+  // Hidden faces are dropped after ranking; fetch slack so k survives.
+  const bool suppress = hidden_count_ > 0 && !opts.include_hidden;
+  const int fetch = suppress && !opts.range ? want * 2 + 16 : want;
+  auto hits = hydrate(candidates_locked(query, fetch, opts.min_score, opts.include_low_quality, opts.range),
+                      opts.include_hidden);
   if (opts.group_by_identity) return group_hits(std::move(hits), k);
   if (!opts.range && static_cast<int>(hits.size()) > k) hits.resize(static_cast<size_t>(k));
   return hits;
@@ -720,7 +733,9 @@ std::vector<Hit> Gallery::search_template(std::span<const Embedding> positives,
   auto consider = [&](uint64_t row) {
     if (row >= n) return;
     const auto& face = faces_.at(row);
-    if (!slot_live(face.flags) || excluded_images.contains(face.image_id)) return;
+    // Low-quality and hidden faces never surface in template results.
+    if (!face_indexable(face.flags) || excluded_images.contains(face.image_id)) return;
+    if (row_hidden_locked(row)) return;
     if (face.image_id == 0 || face.image_id > images_.size()) return;
     const auto& image = images_.at(face.image_id - 1);
     if (!slot_live(image.flags)) return;

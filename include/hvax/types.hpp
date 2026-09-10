@@ -96,6 +96,7 @@ struct Hit {
   float quality = 0;
   uint32_t flags = 0;
   int64_t identity_id = -1;
+  bool hidden = false;  // identity is hidden; only admins receive such hits
   // Only set when hits are grouped by identity: further hits in the same
   // identity that were collapsed into this one.
   int64_t collapsed = 0;
@@ -121,6 +122,7 @@ struct FaceView {
   float quality = 0;
   uint32_t flags = 0;
   int64_t identity_id = -1;
+  bool hidden = false;
   int64_t created_at = 0;
 };
 
@@ -247,6 +249,9 @@ static_assert(sizeof(IdentitySlot) == 128);
 // Identity was curated by hand (merge/split/rename). The clustering job keeps
 // its member faces fixed and never dissolves it.
 inline constexpr uint32_t kIdentityPinned = 2u;
+// Hidden by an operator: the identity's faces never surface in searches,
+// lookups or crops without the identity-management key. Hiding also pins.
+inline constexpr uint32_t kIdentityHidden = 4u;
 
 struct alignas(64) EmbF32 {
   float v[kDim];

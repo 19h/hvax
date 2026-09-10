@@ -411,3 +411,81 @@ TEST(HttpApi, IdentityBrowsingIsOptIn) {
   EXPECT_EQ(plain->body.find("GET    /v1/identities\n"), std::string::npos);
   std::filesystem::remove_all(dir);
 }
+
+TEST(HttpApi, HidingRequiresTheIdentityKey) {
+  auto dir = http_tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.dedup = hvax::DedupMode::sha256;
+  cfg.identity_key = "hush";
+  hvax::Engine engine(cfg);
+  for (int i = 0; i < 3; ++i) {
+    ingest(engine, 10 + i, {face_at(person_embedding(1, i), 10, 10, 200)});
+    ingest(engine, 20 + i, {face_at(person_embedding(2, i), 10, 10, 200)});
+  }
+  ingest(engine, 30, {face_at(person_embedding(1, 9), 10, 10, 200), face_at(person_embedding(2, 9), 300, 300, 200)});
+  ASSERT_TRUE(engine.recluster().has_value());
+  const int64_t id_b = engine.get_face(1).identity_id;
+  ASSERT_GE(id_b, 0);
+  LiveServer live(engine);
+  auto c = live.client();
+  const httplib::Headers key = {{"X-Identity-Key", "hush"}};
+  const httplib::Headers generic = {{"X-API-Key", "hush"}};  // the landing page's key field
+
+  // without the key: no hiding, no listing
+  EXPECT_EQ(c.Post("/v1/identities/" + std::to_string(id_b) + "/hide", "", "application/json")->status, 401);
+  EXPECT_EQ(c.Get("/v1/identities/hidden")->status, 401);
+  EXPECT_FALSE(nlohmann::json::parse(c.Get("/v1/stats")->body)["identity_key_ok"].get<bool>());
+  EXPECT_TRUE(nlohmann::json::parse(c.Get("/v1/stats", key)->body)["identity_key_ok"].get<bool>());
+  // hide with the generic key slot
+  auto r = c.Post("/v1/identities/" + std::to_string(id_b) + "/hide", generic, "", "application/json");
+  ASSERT_EQ(r->status, 200) << r->body;
+  EXPECT_TRUE(nlohmann::json::parse(r->body)["hidden"].get<bool>());
+  auto hidden = nlohmann::json::parse(c.Get("/v1/identities/hidden", key)->body);
+  ASSERT_EQ(hidden["identities"].size(), 1u);
+  EXPECT_EQ(hidden["identities"][0]["identity_id"], id_b);
+
+  // suppressed for the public ...
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b))->status, 404);
+  EXPECT_EQ(c.Get("/v1/faces/1")->status, 404);
+  EXPECT_EQ(c.Get("/v1/faces/1/crop?size=32")->status, 404);
+  httplib::Headers h;
+  h.emplace("X-K", "10");
+  h.emplace("X-Min-Score", "-1");
+  auto q = nlohmann::json::parse(c.Post("/v1/query/embedding", h, raw_embedding(person_embedding(2, 0)), "application/octet-stream")->body);
+  for (auto& hit : q["hits"]) EXPECT_NE(hit["identity_id"], id_b);
+  auto t = nlohmann::json::parse(c.Post("/v1/query/template", h, nlohmann::json{{"positive_embeddings", {std::vector<float>(person_embedding(2, 0).begin(), person_embedding(2, 0).end())}}}.dump(), "application/json")->body);
+  for (auto& hit : t["hits"]) EXPECT_NE(hit["identity_id"], id_b);
+  auto im = engine.get_image(7);
+  auto meta = nlohmann::json::parse(c.Get("/v1/images/" + hvax::to_hex(im.sha256) + "/meta")->body);
+  EXPECT_EQ(meta["face_ids"].size(), 1u);
+  EXPECT_EQ(meta["identities"].size(), 1u);
+  // ... visible and flagged for the admin
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b), key)->status, 200);
+  EXPECT_EQ(c.Get("/v1/faces/1/crop?size=32", key)->status, 200);
+  httplib::Headers hk = h;
+  hk.emplace("X-Identity-Key", "hush");
+  auto qa = nlohmann::json::parse(c.Post("/v1/query/embedding", hk, raw_embedding(person_embedding(2, 0)), "application/octet-stream")->body);
+  bool saw = false;
+  for (auto& hit : qa["hits"]) if (hit["identity_id"] == id_b) { saw = true; EXPECT_TRUE(hit["hidden"].get<bool>()); }
+  EXPECT_TRUE(saw);
+  EXPECT_EQ(nlohmann::json::parse(c.Get("/v1/images/" + hvax::to_hex(im.sha256) + "/meta", key)->body)["face_ids"].size(), 2u);
+  EXPECT_NE(c.Get("/metrics")->body.find("hvax_identities_hidden 1"), std::string::npos);
+  // unhide
+  ASSERT_EQ(c.Post("/v1/identities/" + std::to_string(id_b) + "/unhide", key, "", "application/json")->status, 200);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b))->status, 200);
+  EXPECT_EQ(nlohmann::json::parse(c.Get("/v1/identities/hidden", key)->body)["total"], 0);
+  std::filesystem::remove_all(dir);
+}
+
+TEST(HttpApi, HidingWithoutConfiguredKeyIsRefused) {
+  auto dir = http_tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  hvax::Engine engine(cfg);
+  LiveServer live(engine);
+  auto c = live.client();
+  EXPECT_EQ(c.Post("/v1/identities/0/hide", httplib::Headers{{"X-Identity-Key", "anything"}}, "", "application/json")->status, 403);
+  EXPECT_FALSE(nlohmann::json::parse(c.Get("/v1/stats")->body)["identity_key_configured"].get<bool>());
+  std::filesystem::remove_all(dir);
+}

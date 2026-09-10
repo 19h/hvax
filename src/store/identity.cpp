@@ -59,6 +59,15 @@ void Gallery::load_identity_state_locked() {
   const uint64_t C = identities_.size();
   members_.assign(static_cast<size_t>(C), {});
   centroid_norm_.assign(static_cast<size_t>(C) * kDim, 0.f);
+  hidden_.assign(static_cast<size_t>(C), 0);
+  hidden_count_ = 0;
+  for (uint64_t id = 0; id < C; ++id) {
+    const auto& s = identities_.at(id);
+    if (slot_live(s.flags) && (s.flags & kIdentityHidden)) {
+      hidden_[static_cast<size_t>(id)] = 1;
+      ++hidden_count_;
+    }
+  }
   const uint64_t n = std::min(embs_.size(), faces_.size());
   for (uint64_t i = 0; i < n; ++i) {
     FaceSlot& f = faces_.at(i);
@@ -88,6 +97,7 @@ int64_t Gallery::new_identity_locked(int64_t now) {
   const uint64_t id = identities_.append(s);
   centroids_.append(EmbF32{});
   members_.emplace_back();
+  hidden_.push_back(0);
   centroid_norm_.resize(static_cast<size_t>(id + 1) * kDim, 0.f);
   return static_cast<int64_t>(id);
 }
@@ -187,7 +197,8 @@ void Gallery::try_join_identity_locked(uint64_t row) {
 // ---------------------------------------------------------------------------
 // queries
 
-std::vector<IdentityHit> Gallery::search_identities(const float* query, int k, float min_score) const {
+std::vector<IdentityHit> Gallery::search_identities(const float* query, int k, float min_score,
+                                                    bool include_hidden) const {
   std::shared_lock lock(mu_);
   std::vector<IdentityHit> out;
   if (k <= 0) return out;
@@ -200,6 +211,7 @@ std::vector<IdentityHit> Gallery::search_identities(const float* query, int k, f
   const uint64_t C = identities_.size();
   for (uint64_t id = 0; id < C; ++id) {
     if (!slot_live(identities_.at(id).flags)) continue;
+    if (!include_hidden && hidden_[static_cast<size_t>(id)]) continue;
     const float s = dot512(query, centroid_norm_.data() + static_cast<size_t>(id) * kDim);
     if (s < min_score) continue;
     if (static_cast<int>(heap.size()) < k) heap.push(Item{s, static_cast<int64_t>(id)});
@@ -234,7 +246,7 @@ std::vector<IdentityHit> Gallery::search_identities(const float* query, int k, f
     }
     if (best_row != UINT32_MAX) {
       bool ok = false;
-      Hit bf = hydrate_one(best_row, best, ok);
+      Hit bf = hydrate_one(best_row, best, ok, include_hidden);
       if (ok) h.best_face = bf;
     }
     out.push_back(std::move(h));
@@ -242,9 +254,10 @@ std::vector<IdentityHit> Gallery::search_identities(const float* query, int k, f
   return out;
 }
 
-std::optional<IdentityView> Gallery::identity(int64_t identity_id) const {
+std::optional<IdentityView> Gallery::identity(int64_t identity_id, bool include_hidden) const {
   std::shared_lock lock(mu_);
   if (!identity_live(identity_id)) return std::nullopt;
+  if (!include_hidden && hidden_[static_cast<size_t>(identity_id)]) return std::nullopt;
   auto v = identity_from_slot(identities_.at(static_cast<uint64_t>(identity_id)));
   const auto& rows = members_[static_cast<size_t>(identity_id)];
   if (!rows.empty()) {
@@ -256,13 +269,14 @@ std::optional<IdentityView> Gallery::identity(int64_t identity_id) const {
   return v;
 }
 
-std::vector<IdentityView> Gallery::list_identities(IdentitySort sort, uint64_t offset, uint64_t limit) const {
+std::vector<IdentityView> Gallery::list_identities(IdentitySort sort, uint64_t offset, uint64_t limit,
+                                                   bool include_hidden) const {
   std::shared_lock lock(mu_);
   std::vector<uint64_t> ids;
   const uint64_t C = identities_.size();
   ids.reserve(static_cast<size_t>(C));
   for (uint64_t id = 0; id < C; ++id)
-    if (slot_live(identities_.at(id).flags)) ids.push_back(id);
+    if (slot_live(identities_.at(id).flags) && (include_hidden || !hidden_[static_cast<size_t>(id)])) ids.push_back(id);
   auto key_size = [&](uint64_t a, uint64_t b) {
     const auto& x = identities_.at(a);
     const auto& y = identities_.at(b);
@@ -292,10 +306,11 @@ std::vector<IdentityView> Gallery::list_identities(IdentitySort sort, uint64_t o
 }
 
 std::vector<FaceView> Gallery::identity_faces(int64_t identity_id, FaceSort sort, uint64_t offset, uint64_t limit,
-                                              std::vector<float>* scores) const {
+                                              std::vector<float>* scores, bool include_hidden) const {
   std::shared_lock lock(mu_);
   std::vector<FaceView> out;
   if (!identity_live(identity_id)) return out;
+  if (!include_hidden && hidden_[static_cast<size_t>(identity_id)]) return out;
   const auto& rows = members_[static_cast<size_t>(identity_id)];
   const float* cn = centroid_norm_.data() + static_cast<size_t>(identity_id) * kDim;
   struct Item {
@@ -312,15 +327,17 @@ std::vector<FaceView> Gallery::identity_faces(int64_t identity_id, FaceSort sort
     std::sort(items.begin(), items.end(), [](auto& a, auto& b) { return a.t != b.t ? a.t > b.t : a.row < b.row; });
   for (uint64_t i = offset; i < items.size() && out.size() < limit; ++i) {
     out.push_back(face_from_slot(faces_.at(items[static_cast<size_t>(i)].row)));
+    out.back().hidden = hidden_[static_cast<size_t>(identity_id)] != 0;
     if (scores) scores->push_back(items[static_cast<size_t>(i)].s);
   }
   return out;
 }
 
-std::vector<CooccurrenceEntry> Gallery::cooccurring(int64_t identity_id, uint64_t limit) const {
+std::vector<CooccurrenceEntry> Gallery::cooccurring(int64_t identity_id, uint64_t limit, bool include_hidden) const {
   std::shared_lock lock(mu_);
   std::vector<CooccurrenceEntry> out;
   if (!identity_live(identity_id)) return out;
+  if (!include_hidden && hidden_[static_cast<size_t>(identity_id)]) return out;
   std::vector<std::pair<int64_t, uint64_t>> pairs;  // (other identity, image)
   for (uint32_t r : members_[static_cast<size_t>(identity_id)]) {
     const uint64_t img = faces_.at(r).image_id;
@@ -328,6 +345,7 @@ std::vector<CooccurrenceEntry> Gallery::cooccurring(int64_t identity_id, uint64_
     for (uint32_t o : image_faces_[static_cast<size_t>(img - 1)]) {
       const int64_t other = identity_of(faces_.at(o));
       if (other < 0 || other == identity_id) continue;
+      if (!include_hidden && hidden_[static_cast<size_t>(other)]) continue;
       pairs.emplace_back(other, img);
     }
   }
@@ -346,10 +364,11 @@ std::vector<CooccurrenceEntry> Gallery::cooccurring(int64_t identity_id, uint64_
   return out;
 }
 
-std::vector<TimelineBucket> Gallery::timeline(int64_t identity_id, int64_t bucket_ms) const {
+std::vector<TimelineBucket> Gallery::timeline(int64_t identity_id, int64_t bucket_ms, bool include_hidden) const {
   std::shared_lock lock(mu_);
   std::vector<TimelineBucket> out;
   if (!identity_live(identity_id) || bucket_ms <= 0) return out;
+  if (!include_hidden && hidden_[static_cast<size_t>(identity_id)]) return out;
   std::map<int64_t, uint32_t> buckets;
   for (uint32_t r : members_[static_cast<size_t>(identity_id)]) {
     const int64_t t = static_cast<int64_t>(faces_.at(r).created_at);
@@ -382,6 +401,49 @@ uint64_t Gallery::largest_identity() const {
     if (slot_live(s.flags)) best = std::max<uint64_t>(best, s.size);
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// hiding
+
+bool Gallery::set_identity_hidden(int64_t identity_id, bool hidden) {
+  std::unique_lock lock(mu_);
+  if (!identity_live(identity_id)) return false;
+  auto& s = identities_.at(static_cast<uint64_t>(identity_id));
+  const bool was = (s.flags & kIdentityHidden) != 0;
+  if (hidden) s.flags |= kIdentityHidden | kIdentityPinned;
+  else s.flags &= ~kIdentityHidden;
+  s.updated_at = static_cast<uint64_t>(unix_ms());
+  hidden_[static_cast<size_t>(identity_id)] = hidden ? 1 : 0;
+  if (hidden && !was) ++hidden_count_;
+  if (!hidden && was) --hidden_count_;
+  identities_.sync_header();
+  return true;
+}
+
+bool Gallery::identity_hidden(int64_t identity_id) const {
+  std::shared_lock lock(mu_);
+  return identity_live(identity_id) && hidden_[static_cast<size_t>(identity_id)] != 0;
+}
+
+bool Gallery::face_hidden(int64_t face_id) const {
+  std::shared_lock lock(mu_);
+  return face_id >= 0 && row_hidden_locked(static_cast<uint64_t>(face_id));
+}
+
+std::vector<IdentityView> Gallery::hidden_identities() const {
+  std::shared_lock lock(mu_);
+  std::vector<IdentityView> out;
+  for (uint64_t id = 0; id < identities_.size(); ++id) {
+    const auto& s = identities_.at(id);
+    if (slot_live(s.flags) && (s.flags & kIdentityHidden)) out.push_back(identity_from_slot(s));
+  }
+  return out;
+}
+
+uint64_t Gallery::hidden_identity_count() const {
+  std::shared_lock lock(mu_);
+  return hidden_count_;
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +578,7 @@ void Gallery::apply_labels_locked(const std::vector<int64_t>& labels, uint64_t n
   // Rebuild membership from the refs (rows >= n keep whatever they had).
   const uint64_t C = identities_.size();
   members_.assign(static_cast<size_t>(C), {});
+  hidden_.resize(static_cast<size_t>(C), 0);
   const uint64_t total = std::min(embs_.size(), faces_.size());
   for (uint64_t i = 0; i < total; ++i) {
     const FaceSlot& f = faces_.at(i);

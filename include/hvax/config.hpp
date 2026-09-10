@@ -52,6 +52,10 @@ struct Config {
   // and curating identities are off unless explicitly enabled. Looking up a
   // person reached from a search hit stays available either way.
   bool identity_browse = false;
+  // Identity-management key: requests presenting it (X-Identity-Key, or
+  // X-API-Key) may hide/unhide people, list hidden people and see hidden
+  // faces. Falls back to $HVAX_IDENTITY_KEY.
+  std::string identity_key;
 
   // One-shot maintenance modes; the daemon exits after running them.
   bool reindex = false;

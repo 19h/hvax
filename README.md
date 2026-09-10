@@ -484,6 +484,9 @@ queries accept `X-K` values up to 256.
 | `POST` | `/v1/identities/:id/split` | `{"face_ids": [..]}` — move faces into a new pinned person |
 | `PATCH` | `/v1/identities/:id` | `{"name": "..", "assign_face_ids": [..]}` — rename or assign faces |
 | `DELETE` | `/v1/identities/:id` | Dissolve a person; its faces become unassigned |
+| `POST` | `/v1/identities/:id/hide` | Hide a person everywhere (identity key) |
+| `POST` | `/v1/identities/:id/unhide` | Unhide (identity key) |
+| `GET` | `/v1/identities/hidden` | List hidden people (identity key) |
 | `GET` | `/v1/eval/impostor?pairs=N` | Label-free impostor evaluation of the embedding model |
 | `GET` | `/v1/images/:sha256/meta` | Fetch image metadata and face IDs |
 | `GET` | `/v1/images/:sha256` | Download the stored master image |
@@ -619,6 +622,24 @@ Without the flag those routes return `403` and the page hides the grid, while
 crops stay available so a person reached from a search hit can still be opened.
 `/v1/stats` reports the setting as `identity_browse`.
 
+### Hiding people
+
+Start `hvaxd --identity-key SECRET` (or set `HVAX_IDENTITY_KEY`) to enable
+identity management. A request that presents the key — as `X-Identity-Key`,
+or in `X-API-Key`, which is what the landing page's key field sends — may
+`POST /v1/identities/:id/hide`, `POST /v1/identities/:id/unhide` and
+`GET /v1/identities/hidden`. Hiding pins the identity so clustering keeps it,
+and new faces that join it at ingest are hidden with it.
+
+For every other request a hidden person does not exist: their faces are dropped
+from face, template and people searches, `GET /v1/identities/:id` (and
+`/faces`, `/cooccurring`, `/timeline`) answers 404, `GET /v1/faces/:id` and the
+crop answer 404, and image metadata omits their faces. Requests carrying the
+key see hidden faces with `"hidden": true`. `/v1/stats` reports
+`identity_key_configured`, `identity_key_ok` for the presented key, and
+`hidden_identities`; the landing page shows hide/unhide controls and a list of
+hidden people once the key field holds the identity key.
+
 Curation pins identities. A pinned identity's faces are fixed labels during
 clustering, two pinned identities are never merged automatically, and a pinned
 identity is never dissolved by the job. `PATCH` with a name pins as well.
@@ -714,6 +735,7 @@ risk of false positives.
 --cluster-neighbors N   kNN width for clustering             (default: 50)
 --cluster-interval S    recluster in the background every S s (default: off)
 --identity-browse       expose people listing, curation, cluster trigger (default: off)
+--identity-key STR      key allowed to hide/unhide people ($HVAX_IDENTITY_KEY)
 --reindex               recompute flags, requantise, rebuild HNSW; exit
 --cluster               run identity clustering once; exit
 --eval-impostor [N]     impostor evaluation over up to N pairs; exit

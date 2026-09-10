@@ -479,18 +479,19 @@ std::vector<Hit> Engine::query_template(std::span<const Embedding> positive_embe
   return hits;
 }
 
-std::vector<IdentityHit> Engine::query_embedding_identities(std::span<const float> vec, int k, float min_score) {
+std::vector<IdentityHit> Engine::query_embedding_identities(std::span<const float> vec, int k, float min_score,
+                                                            bool include_hidden) {
   metrics_.query_identity.fetch_add(1, std::memory_order_relaxed);
   if (vec.size() != static_cast<size_t>(kDim)) return {};
   Embedding q{};
   std::copy(vec.begin(), vec.end(), q.begin());
   l2_normalize(q.data());
   if (k <= 0) k = cfg_.default_k;
-  return gallery_->search_identities(q.data(), k, min_score);
+  return gallery_->search_identities(q.data(), k, min_score, include_hidden);
 }
 
 std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> Engine::query_image_identities(
-    std::span<const uint8_t> bytes, int k, float min_score) {
+    std::span<const uint8_t> bytes, int k, float min_score, bool include_hidden) {
   metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
   metrics_.query_identity.fetch_add(1, std::memory_order_relaxed);
   cv::Mat img = decode_image(bytes, cfg_.max_pixels);
@@ -500,7 +501,7 @@ std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> Engine::query_ima
   out.reserve(faces.size());
   if (k <= 0) k = cfg_.default_k;
   for (auto& f : faces) {
-    auto hits = gallery_->search_identities(f.embedding.data(), k, min_score);
+    auto hits = gallery_->search_identities(f.embedding.data(), k, min_score, include_hidden);
     out.emplace_back(std::move(f), std::move(hits));
   }
   return out;
@@ -555,6 +556,7 @@ std::string Engine::prometheus() const {
   o << "hvax_faces_unassigned " << gallery_->unassigned_faces() << "\n";
   o << "hvax_images " << gallery_->live_images() << "\n";
   o << "hvax_identities " << gallery_->identity_count() << "\n";
+  o << "hvax_identities_hidden " << gallery_->hidden_identity_count() << "\n";
   o << "hvax_identity_largest " << gallery_->largest_identity() << "\n";
   o << "hvax_cluster_runs_total " << metrics_.cluster_runs.load() << "\n";
   o << "hvax_cluster_last_milliseconds " << metrics_.cluster_ms_last.load() << "\n";

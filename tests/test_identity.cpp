@@ -462,3 +462,67 @@ TEST(ChineseWhispers, SeparatesTwoCliquesAndRespectsFixedLabels) {
   EXPECT_NE(labels[0], labels[4]);
   EXPECT_NE(labels[0], 100u);
 }
+
+TEST(Identity, HiddenIdentitiesAreSuppressedEverywhere) {
+  auto dir = tmpdir();
+  hvax::Gallery g(make_cfg(dir));
+  seed_two_people(g);
+  hvax::ClusterParams p;
+  p.threads = 2;
+  ASSERT_TRUE(g.recluster(p).has_value());
+  const int64_t id_a = g.face(0).identity_id;
+  const int64_t id_b = g.face(1).identity_id;
+  ASSERT_TRUE(g.set_identity_hidden(id_b, true));
+  EXPECT_TRUE(g.identity_hidden(id_b));
+  EXPECT_TRUE(g.face_hidden(1));
+  EXPECT_FALSE(g.face_hidden(0));
+  EXPECT_EQ(g.hidden_identity_count(), 1u);
+  ASSERT_EQ(g.hidden_identities().size(), 1u);
+  EXPECT_EQ(g.hidden_identities()[0].identity_id, id_b);
+  EXPECT_TRUE(g.hidden_identities()[0].flags & hvax::kIdentityPinned) << "hiding pins";
+
+  // face search: B's faces vanish, even when the query is one of them
+  auto hits = g.search(person_embedding(2, 0).data(), 10, -1.f);
+  for (auto& h : hits) EXPECT_NE(h.identity_id, id_b);
+  hvax::SearchOptions o;
+  o.k = 10;
+  o.min_score = -1.f;
+  o.include_hidden = true;
+  auto admin_hits = g.search(person_embedding(2, 0).data(), o);
+  EXPECT_TRUE(std::any_of(admin_hits.begin(), admin_hits.end(), [&](auto& h) { return h.identity_id == id_b && h.hidden; }));
+  // identity search, lookups, listing, co-occurrence
+  auto ih = g.search_identities(person_embedding(2, 1).data(), 5, -1.f);
+  for (auto& h : ih) EXPECT_NE(h.identity_id, id_b);
+  EXPECT_FALSE(g.identity(id_b).has_value());
+  EXPECT_TRUE(g.identity(id_b, true).has_value());
+  EXPECT_TRUE(g.identity_faces(id_b, hvax::FaceSort::score, 0, 10).empty());
+  EXPECT_EQ(g.identity_faces(id_b, hvax::FaceSort::score, 0, 10, nullptr, true).size(), 4u);
+  EXPECT_EQ(g.list_identities(hvax::IdentitySort::size, 0, 10).size(), 1u);
+  EXPECT_EQ(g.list_identities(hvax::IdentitySort::size, 0, 10, true).size(), 2u);
+  EXPECT_TRUE(g.cooccurring(id_a, 10).empty()) << "the hidden co-star is not reported";
+  EXPECT_EQ(g.cooccurring(id_a, 10, true).size(), 1u);
+  // template search skips hidden faces too
+  std::array<hvax::Embedding, 1> pos{person_embedding(2, 2)};
+  for (auto& h : g.search_template(pos, {}, {}, 10, -1.f)) EXPECT_NE(h.identity_id, id_b);
+  // a new face of the hidden person joins it and is suppressed immediately
+  insert_image(g, 60, {face_at(person_embedding(2, 40), 10, 10, 200)});
+  EXPECT_EQ(g.face(8).identity_id, id_b);
+  EXPECT_TRUE(g.face_hidden(8));
+  // survives a recluster and a reopen
+  ASSERT_TRUE(g.recluster(p).has_value());
+  EXPECT_TRUE(g.identity_hidden(id_b));
+  g.flush();
+  {
+    hvax::Gallery g2(make_cfg(dir));
+    EXPECT_TRUE(g2.identity_hidden(id_b));
+    EXPECT_EQ(g2.hidden_identity_count(), 1u);
+    EXPECT_TRUE(g2.search(person_embedding(2, 0).data(), 10, -1.f).empty() ||
+                g2.search(person_embedding(2, 0).data(), 10, -1.f)[0].identity_id != id_b);
+  }
+  // unhide restores everything
+  ASSERT_TRUE(g.set_identity_hidden(id_b, false));
+  EXPECT_EQ(g.hidden_identity_count(), 0u);
+  EXPECT_TRUE(g.identity(id_b).has_value());
+  EXPECT_FALSE(g.cooccurring(id_a, 10).empty());
+  std::filesystem::remove_all(dir);
+}

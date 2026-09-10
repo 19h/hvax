@@ -58,9 +58,10 @@ class Engine {
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes,
                                                                      const SearchOptions& opts, bool detect_only = false);
   // Identity mode: people ranked by centroid cosine.
-  std::vector<IdentityHit> query_embedding_identities(std::span<const float> vec, int k, float min_score);
+  std::vector<IdentityHit> query_embedding_identities(std::span<const float> vec, int k, float min_score,
+                                                      bool include_hidden = false);
   std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> query_image_identities(
-      std::span<const uint8_t> bytes, int k, float min_score);
+      std::span<const uint8_t> bytes, int k, float min_score, bool include_hidden = false);
   std::vector<Hit> query_template(std::span<const Embedding> positive_embeddings,
                                   std::span<const int64_t> positive_face_ids,
                                   std::span<const Embedding> negative_embeddings,

@@ -1,6 +1,7 @@
 #include "hvax/config.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -44,6 +45,7 @@ void print_usage() {
       << "  --cluster-neighbors N   kNN width for clustering, default 50\n"
       << "  --cluster-interval S    recluster in the background every S seconds, default off\n"
       << "  --identity-browse       expose the people listing, curation and cluster trigger over HTTP\n"
+      << "  --identity-key STR      key that may hide/unhide people (or $HVAX_IDENTITY_KEY)\n"
       << "  --reindex               recompute quality flags, requantize int8, rebuild HNSW; exit\n"
       << "  --cluster               run identity clustering once; exit\n"
       << "  --eval-impostor [N]     print impostor-pair evaluation over up to N pairs; exit\n"
@@ -112,6 +114,7 @@ Config parse_args(int argc, char** argv) {
     else if (eq(argv[i], "--cluster-neighbors")) c.cluster_neighbors = std::stoi(need("--cluster-neighbors"));
     else if (eq(argv[i], "--cluster-interval")) c.cluster_interval_s = std::stoi(need("--cluster-interval"));
     else if (eq(argv[i], "--identity-browse")) c.identity_browse = true;
+    else if (eq(argv[i], "--identity-key")) c.identity_key = need("--identity-key");
     else if (eq(argv[i], "--reindex")) c.reindex = true;
     else if (eq(argv[i], "--cluster")) c.cluster_once = true;
     else if (eq(argv[i], "--eval-impostor")) {
@@ -128,6 +131,8 @@ Config parse_args(int argc, char** argv) {
       throw std::runtime_error(std::string("unknown flag: ") + argv[i]);
     }
   }
+  if (c.identity_key.empty())
+    if (const char* env = std::getenv("HVAX_IDENTITY_KEY"); env && *env) c.identity_key = env;
   if (c.inference.intra_threads <= 0) throw std::runtime_error("--threads must be positive");
   if (c.http_threads <= 0) throw std::runtime_error("--http-threads must be positive");
   if (c.det_size <= 0 || c.det_size % 32 != 0)
