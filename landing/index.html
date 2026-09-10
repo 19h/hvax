@@ -502,7 +502,7 @@
     </div>
   </section>
 
-  <section class="stage" id="stage" tabindex="0" role="button" aria-label="drop images or PDFs to ingest, or images to search">
+  <section class="stage" id="stage" tabindex="0" role="button" aria-label="paste or drop images or PDFs to ingest, or images to search">
     <p class="hint" id="hint"><span id="hinttext">add reference images</span></p>
     <p class="sub" id="uploadhelp">jpeg / png / webp · paste, drop, or click · up to 16 faces</p>
     <div class="controls" id="controls">
@@ -583,6 +583,7 @@
   let thumbGeneration = 0;
   let resultThumbObserver = null;
   let ingestBatchGeneration = 0;
+  let pulseToken = 0;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -1434,10 +1435,236 @@
     refresh();
   }
 
+  function isAcceptedUpload(file) {
+    if (!file || !(file.size > 0)) return false;
+    const type = String(file.type || "").toLowerCase();
+    if (type.startsWith("image/") || type === "application/pdf") return true;
+    if (type && type !== "application/octet-stream") return false;
+    return isPdf(file) || /\.(jpe?g|png|webp|gif|bmp|tif|tiff)$/i.test(file.name || "");
+  }
+
+  function extensionForMime(type, fallback) {
+    type = String(type || "").toLowerCase();
+    if (type === "image/jpeg" || type === "image/jpg") return "jpg";
+    if (type === "image/png") return "png";
+    if (type === "image/webp") return "webp";
+    if (type === "image/gif") return "gif";
+    if (type === "image/bmp") return "bmp";
+    if (type === "application/pdf") return "pdf";
+    return fallback || "png";
+  }
+
+  function namedPasteFiles(files) {
+    return files.map((file, index) => {
+      const name = file.name || "";
+      if (name && !/^image\.(png|jpe?g|gif|webp|bmp)$/i.test(name) && name !== "blob") return file;
+      const ext = extensionForMime(file.type, (name.split(".").pop() || "png").toLowerCase());
+      return new File([file], "paste-" + (index + 1) + "." + ext, {
+        type: file.type || "image/" + (ext === "jpg" ? "jpeg" : ext),
+        lastModified: file.lastModified || Date.now()
+      });
+    });
+  }
+
+  function collectClipboardFiles(dt) {
+    if (!dt) return [];
+    const files = [];
+    const seen = new Set();
+    const add = (file) => {
+      if (!isAcceptedUpload(file)) return;
+      const key = (file.name || "") + "\0" + file.size + "\0" + file.type + "\0" + file.lastModified;
+      if (seen.has(key)) return;
+      seen.add(key);
+      files.push(file);
+    };
+    const list = dt.files;
+    if (list && list.length) {
+      for (let i = 0; i < list.length; i++) add(list[i]);
+    }
+    const items = dt.items;
+    if (items && items.length) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || item.kind !== "file") continue;
+        try { add(item.getAsFile()); } catch (e) {}
+      }
+    }
+    return files;
+  }
+
+  function htmlImageUrls(html) {
+    if (!html) return [];
+    const urls = [];
+    const seen = new Set();
+    const add = (url) => {
+      if (!url) return;
+      url = String(url).trim().replace(/^['"]|['"]$/g, "");
+      if (!url || seen.has(url)) return;
+      if (url.slice(0, 2) === "//") url = location.protocol + url;
+      else if (url.charAt(0) === "/" && url.charAt(1) !== "/") url = location.origin + url;
+      else if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+        try { url = new URL(url, location.href).href; } catch (e) { return; }
+      }
+      if (!/^(https?:|data:image\/|blob:)/i.test(url)) return;
+      seen.add(url);
+      urls.push(url);
+    };
+    if (typeof DOMParser === "function") {
+      try {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        doc.querySelectorAll("img").forEach((img) => add(img.getAttribute("src")));
+      } catch (e) {}
+    }
+    if (urls.length === 0) {
+      const re = /<img\b[^>]*\bsrc\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/ig;
+      let match;
+      while ((match = re.exec(html))) add(match[1] || match[2] || "");
+    }
+    return urls;
+  }
+
+  function clipboardImageUrls(dt) {
+    if (!dt) return [];
+    const urls = [];
+    const seen = new Set();
+    const add = (url) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      urls.push(url);
+    };
+    let html = "";
+    let uri = "";
+    try { html = dt.getData("text/html") || ""; } catch (e) {}
+    try { uri = dt.getData("text/uri-list") || ""; } catch (e) {}
+    htmlImageUrls(html).forEach(add);
+    String(uri).split(/\r?\n/).forEach((line) => {
+      line = line.trim();
+      if (!line || line.charAt(0) === "#") return;
+      if (/^(https?:|data:image\/|blob:)/i.test(line)) add(line);
+    });
+    return urls;
+  }
+
+  async function fileFromUrl(url, index) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("fetch");
+    const blob = await response.blob();
+    const type = blob.type || "";
+    const ext = extensionForMime(type, "png");
+    const file = new File([blob], "paste-" + (index + 1) + "." + ext, {
+      type: type || "image/" + (ext === "jpg" ? "jpeg" : ext),
+      lastModified: Date.now()
+    });
+    if (!isAcceptedUpload(file)) throw new Error("type");
+    return file;
+  }
+
+  async function filesFromUrls(urls) {
+    const limited = (urls || []).slice(0, 32);
+    const results = await Promise.all(limited.map((url, i) =>
+      fileFromUrl(url, i).then((file) => file, () => null)));
+    return results.filter((file) => file && file.size > 0);
+  }
+
+  async function readClipboardApiFiles() {
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") return [];
+    let items;
+    try { items = await navigator.clipboard.read(); }
+    catch (e) { return []; }
+    const files = [];
+    for (const item of items || []) {
+      const types = item.types || [];
+      const type = types.find((value) => value.startsWith("image/") || value === "application/pdf");
+      if (!type) continue;
+      try {
+        const blob = await item.getType(type);
+        const ext = extensionForMime(type, "png");
+        const file = new File([blob], "paste-" + (files.length + 1) + "." + ext, {
+          type: type,
+          lastModified: Date.now()
+        });
+        if (isAcceptedUpload(file)) files.push(file);
+      } catch (e) {}
+    }
+    return files;
+  }
+
+  function pasteTargetIsTextField(target) {
+    const el = target && target.nodeType === 1 ? target : target && target.parentElement;
+    if (!el || !el.closest) return false;
+    if (el.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']")) return true;
+    return !!el.isContentEditable;
+  }
+
+  function pulseStage() {
+    const token = ++pulseToken;
+    stage.classList.add("drag");
+    window.setTimeout(() => {
+      if (token === pulseToken) stage.classList.remove("drag");
+    }, 220);
+  }
+
+  function applyPastedFiles(files) {
+    const named = namedPasteFiles(files);
+    if (!named.length) return false;
+    pulseStage();
+    onFiles(named);
+    return true;
+  }
+
+  function restoreUploadHint() {
+    $("hinttext").textContent = mode === "ingest" ? "add photos or PDFs" : "add reference images";
+  }
+
+  function onClipboardPaste(e) {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const inField = pasteTargetIsTextField(e.target);
+    const files = collectClipboardFiles(dt);
+    const urls = clipboardImageUrls(dt);
+    let plain = "";
+    try { plain = String(dt.getData("text/plain") || "").trim(); } catch (e) {}
+    if (inField && plain) return;
+    const takeUrls = (extracted) => {
+      restoreUploadHint();
+      if (extracted.length > 1) applyPastedFiles(extracted);
+      else if (files.length) applyPastedFiles(files);
+      else if (extracted.length) applyPastedFiles(extracted);
+    };
+    // Finder multi-file copy fills `files`; webpage copies often have one bitmap plus HTML <img>s.
+    if (files.length > 1) {
+      e.preventDefault();
+      applyPastedFiles(files);
+      return;
+    }
+    if (urls.length > 1) {
+      e.preventDefault();
+      pulseStage();
+      $("hinttext").textContent = "reading clipboard…";
+      void filesFromUrls(urls).then(takeUrls);
+      return;
+    }
+    if (files.length) {
+      e.preventDefault();
+      applyPastedFiles(files);
+      return;
+    }
+    if (urls.length && !inField) {
+      e.preventDefault();
+      pulseStage();
+      $("hinttext").textContent = "reading clipboard…";
+      void filesFromUrls(urls).then(takeUrls);
+      return;
+    }
+    if (inField || plain) return;
+    void readClipboardApiFiles().then((apiFiles) => { applyPastedFiles(apiFiles); });
+  }
+
   function onFiles(list) {
-    if (!list || !list[0]) return;
-    if (mode === "query") void addReferenceFiles(list);
-    else void sendIngestBatch(list);
+    const files = Array.from(list || []).filter((file) => file && file.size > 0);
+    if (!files.length) return;
+    if (mode === "query") void addReferenceFiles(files);
+    else void sendIngestBatch(files);
     fileEl.value = "";
   }
 
@@ -1462,10 +1689,7 @@
     stage.addEventListener(ev, (e) => { e.preventDefault(); stage.classList.remove("drag"); });
   });
   stage.addEventListener("drop", (e) => onFiles(e.dataTransfer.files));
-  document.addEventListener("paste", (e) => {
-    const items = e.clipboardData && e.clipboardData.files;
-    onFiles(items);
-  });
+  document.addEventListener("paste", onClipboardPaste);
   keyEl.addEventListener("input", () => {
     try { sessionStorage.setItem("hvax-key", keyEl.value); } catch (e) {}
     paintCurl();

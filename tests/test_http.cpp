@@ -35,6 +35,11 @@ TEST(Landing, HtmlDocument) {
   EXPECT_NE(html.find("zoomable"), std::string_view::npos);
   EXPECT_NE(html.find("IntersectionObserver"), std::string_view::npos);
   EXPECT_NE(html.find("MAX_IMAGE_REQUESTS = 4"), std::string_view::npos);
+  EXPECT_NE(html.find("function onClipboardPaste"), std::string_view::npos);
+  EXPECT_NE(html.find("function collectClipboardFiles"), std::string_view::npos);
+  EXPECT_NE(html.find("function clipboardImageUrls"), std::string_view::npos);
+  EXPECT_NE(html.find("addEventListener(\"paste\", onClipboardPaste)"), std::string_view::npos);
+  EXPECT_NE(html.find("paste or drop images or PDFs"), std::string_view::npos);
 }
 
 TEST(Config, DefaultSearchSizeIsThirtyTwo) { EXPECT_EQ(hvax::Config{}.default_k, 32); }
