@@ -558,6 +558,42 @@
     outline: none;
   }
   #person .name:focus { border-color: var(--cyan); }
+  .rpeople { display: grid; gap: 0.6rem; margin-top: 0.4rem; }
+  .rp-card {
+    border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--panel) 70%, var(--bg));
+    padding: 0.55rem 0.7rem 0.65rem;
+    display: grid;
+    gap: 0.45rem;
+  }
+  .rp-head {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    gap: 0.6rem;
+    align-items: center;
+    font-size: 12px;
+    color: var(--mute);
+  }
+  .rp-head img { width: 56px; height: 56px; object-fit: cover; background: #000; display: block; }
+  .rp-head strong { color: var(--bright); font-weight: 400; }
+  .rp-head .v { color: var(--cyan); }
+  .rp-head button {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--cyan);
+    font: inherit;
+    font-size: 11px;
+    padding: 0.2rem 0.55rem;
+    cursor: pointer;
+  }
+  .rp-head button:hover { border-color: var(--cyan); }
+  .rp-card h3 {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--hot);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
   .empty { color: var(--mute); font-size: 12px; }
   .empty[hidden] { display: none; }
   @media (max-width: 560px) {
@@ -696,6 +732,7 @@
   let psort = "size";
   let plimit = 24;
   let identityBrowse = false;
+  let resultPeopleGeneration = 0;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -850,6 +887,76 @@
     fillCrops(grid);
     bindOpen(grid, ".pc");
   }
+  // People behind the current results: one card per identity, best hit first,
+  // with the person's faces and who they are seen with. This is the only
+  // identity browsing a public gallery offers — it always starts from a face.
+  async function renderResultPeople() {
+    const box = $("rpeople");
+    if (!box) return;
+    const generation = ++resultPeopleGeneration;
+    const ids = [];
+    for (const hit of results) {
+      const id = hit.identity_id;
+      if (id === null || id === undefined || ids.includes(id)) continue;
+      ids.push(id);
+      if (ids.length >= 6) break;
+    }
+    if (ids.length === 0) {
+      box.innerHTML = "<div class='out-h'><span>no known people among these matches</span></div>";
+      return;
+    }
+    box.innerHTML = "<div class='out-h'><strong>people</strong><span>" + ids.length + " in these matches</span></div>";
+    for (const id of ids) {
+      const card = document.createElement("div");
+      card.className = "rp-card";
+      card.innerHTML = "<div class='rp-head'><span></span><span>loading #" + esc(id) + "…</span><span></span></div>";
+      box.appendChild(card);
+    }
+    await Promise.all(ids.map(async (id, index) => {
+      const [p, faces, co] = await Promise.all([
+        api("/v1/identities/" + id),
+        api("/v1/identities/" + id + "/faces?limit=12"),
+        api("/v1/identities/" + id + "/cooccurring?limit=8"),
+      ]);
+      if (generation !== resultPeopleGeneration) return;
+      const card = box.querySelectorAll(".rp-card")[index];
+      if (!card) return;
+      if (!p) { card.innerHTML = "<div class='rp-head'><span></span><span>#" + esc(id) + " unavailable</span><span></span></div>"; return; }
+      const best = results.find((hit) => hit.identity_id === id);
+      let html = "<div class='rp-head'><img alt='' data-face='" + esc(p.rep_face_id) + "' data-size='96'>"
+        + "<span><strong>" + personLabel(p) + "</strong>" + (p.pinned ? " · pinned" : "") + "<br>"
+        + esc(p.size) + " face" + (p.size === 1 ? "" : "s") + " · " + esc(p.n_images) + " image" + (p.n_images === 1 ? "" : "s")
+        + " · seen " + when(p.first_seen) + " → " + when(p.last_seen)
+        + (best ? " · best match <span class='v'>" + Number(best.score).toFixed(3) + "</span>" : "") + "</span>"
+        + "<button type='button' data-ref-person='" + esc(p.rep_face_id) + "' title='add the representative face to the positive pool'>use as reference</button></div>";
+      const list = (faces && faces.faces) || [];
+      if (list.length) {
+        html += "<h3>faces</h3><div class='people-grid'>";
+        for (const f of list) {
+          html += "<a class='pc' href='" + (f.sha256 ? "/v1/images/" + esc(f.sha256) : "/v1/faces/" + esc(f.face_id)) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
+            + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'><b>" + Number(f.score).toFixed(2) + "</b></a>";
+        }
+        html += "</div>";
+      }
+      const cos = (co && co.cooccurring) || [];
+      if (cos.length) {
+        html += "<h3>seen with</h3><div class='people-grid'>";
+        for (const c of cos) {
+          html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(c.identity_id) + "' title='" + (c.name ? esc(c.name) : "#" + esc(c.identity_id)) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + "'>"
+            + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
+        }
+        html += "</div>";
+      }
+      card.innerHTML = html;
+      fillCrops(card);
+      bindOpen(card, "[data-id]");
+      card.querySelector("[data-ref-person]").addEventListener("click", () => {
+        setFeedback(Number(p.rep_face_id), "positive", { image_id: null, identity_id: id });
+        $("apply").scrollIntoView({ block: "nearest" });
+      });
+    }));
+  }
+
   async function openPerson(id) {
     const box = $("person");
     box.hidden = false;
@@ -1309,7 +1416,9 @@
         ">not my person</button></div></div>";
     }
     if (results.length > 0) html += "</div>";
+    if (results.length > 0 && !searchBusy) html += "<div class='rpeople' id='rpeople'></div>";
     out.innerHTML = html;
+    if (results.length > 0 && !searchBusy) void renderResultPeople();
     const loadResultThumbnail = (element, hit) => {
       const image = element.querySelector("img");
       if (!image || image.dataset.loading === "1") return;
