@@ -1920,7 +1920,10 @@
     const seen = new Set();
     const add = (file) => {
       if (!isAcceptedUpload(file)) return;
-      const key = (file.name || "") + "\0" + file.size + "\0" + file.type + "\0" + file.lastModified;
+      // Chrome hands the same pasted bitmap out through `files` and again through
+      // items[i].getAsFile(), and the latter carries a fresh lastModified every
+      // call, so identity is name + size + type only.
+      const key = (file.name || "") + "\0" + file.size + "\0" + file.type;
       if (seen.has(key)) return;
       seen.add(key);
       files.push(file);
@@ -1929,8 +1932,10 @@
     if (list && list.length) {
       for (let i = 0; i < list.length; i++) add(list[i]);
     }
+    // `items` only adds something when `files` was empty (some apps expose the
+    // bitmap solely as an item); otherwise it is the same file again.
     const items = dt.items;
-    if (items && items.length) {
+    if (files.length === 0 && items && items.length) {
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
         if (!item || item.kind !== "file") continue;
@@ -2075,23 +2080,11 @@
     if (inField && plain) return;
     const takeUrls = (extracted) => {
       restoreUploadHint();
-      if (extracted.length > 1) applyPastedFiles(extracted);
-      else if (files.length) applyPastedFiles(files);
-      else if (extracted.length) applyPastedFiles(extracted);
+      if (extracted.length) applyPastedFiles(extracted);
     };
-    // Finder multi-file copy fills `files`; webpage copies often have one bitmap plus HTML <img>s.
-    if (files.length > 1) {
-      e.preventDefault();
-      applyPastedFiles(files);
-      return;
-    }
-    if (urls.length > 1) {
-      e.preventDefault();
-      pulseStage();
-      $("hinttext").textContent = "reading clipboard…";
-      void filesFromUrls(urls).then(takeUrls);
-      return;
-    }
+    // A real file on the clipboard always wins: a copied web image also carries
+    // an HTML fragment whose <img> tags (tracking pixels, avatars) used to be
+    // fetched alongside the bitmap and pasted as extra images.
     if (files.length) {
       e.preventDefault();
       applyPastedFiles(files);
