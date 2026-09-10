@@ -454,7 +454,14 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   h.emplace("X-Min-Score", "-1");
   auto q = nlohmann::json::parse(c.Post("/v1/query/embedding", h, raw_embedding(person_embedding(2, 0)), "application/octet-stream")->body);
   for (auto& hit : q["hits"]) EXPECT_NE(hit["identity_id"], id_b);
-  auto t = nlohmann::json::parse(c.Post("/v1/query/template", h, nlohmann::json{{"positive_embeddings", {std::vector<float>(person_embedding(2, 0).begin(), person_embedding(2, 0).end())}}}.dump(), "application/json")->body);
+  const hvax::Embedding probe_b = person_embedding(2, 0);
+  nlohmann::json tpl_body;
+  tpl_body["positive_embeddings"] = nlohmann::json::array();
+  tpl_body["positive_embeddings"].push_back(std::vector<float>(probe_b.begin(), probe_b.end()));
+  auto tr0 = c.Post("/v1/query/template", h, tpl_body.dump(), "application/json");
+  ASSERT_EQ(tr0->status, 200) << tr0->body;
+  auto t = nlohmann::json::parse(tr0->body);
+  EXPECT_GT(t["hits"].size(), 0u) << "person 1 still matches";
   for (auto& hit : t["hits"]) EXPECT_NE(hit["identity_id"], id_b);
   auto im = engine.get_image(7);
   auto meta = nlohmann::json::parse(c.Get("/v1/images/" + hvax::to_hex(im.sha256) + "/meta")->body);
@@ -469,7 +476,9 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   bool saw = false;
   for (auto& hit : qa["hits"]) if (hit["identity_id"] == id_b) { saw = true; EXPECT_TRUE(hit["hidden"].get<bool>()); }
   EXPECT_TRUE(saw);
-  auto ta = nlohmann::json::parse(c.Post("/v1/query/template", hk, nlohmann::json{{"positive_embeddings", {std::vector<float>(person_embedding(2, 0).begin(), person_embedding(2, 0).end())}}}.dump(), "application/json")->body);
+  auto tr = c.Post("/v1/query/template", hk, tpl_body.dump(), "application/json");
+  ASSERT_EQ(tr->status, 200) << tr->body;
+  auto ta = nlohmann::json::parse(tr->body);
   bool saw_t = false;
   for (auto& hit : ta["hits"]) if (hit["identity_id"] == id_b) { saw_t = true; EXPECT_TRUE(hit["hidden"].get<bool>()); }
   EXPECT_TRUE(saw_t) << "keyed template search shows hidden faces";
