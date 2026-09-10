@@ -42,7 +42,7 @@ deps:
 	case "$$os" in \
 	  Darwin) \
 	    command -v brew >/dev/null 2>&1 || { echo "Homebrew is required for 'make deps'" >&2; exit 2; }; \
-	    brew install cmake ninja opencv openssl spdlog nlohmann-json googletest; \
+	    brew install cmake ninja opencv openssl spdlog nlohmann-json googletest poppler; \
 	    ;; \
 	  Linux) \
 	    command -v apt-get >/dev/null 2>&1 || { echo "apt-get is required for 'make deps' on Linux" >&2; exit 2; }; \
@@ -54,7 +54,7 @@ deps:
 	    fi; \
 	    "$${apt[@]}" update; \
 	    "$${apt[@]}" install -y build-essential cmake ninja-build curl ca-certificates \
-	      libopencv-dev libssl-dev libspdlog-dev nlohmann-json3-dev libgtest-dev; \
+	      libopencv-dev libssl-dev libspdlog-dev nlohmann-json3-dev libgtest-dev poppler-utils; \
 	    ;; \
 	  *) \
 	    echo "unsupported host for automatic dependency installation: $$os" >&2; \

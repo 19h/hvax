@@ -5,6 +5,7 @@
   "description": "Chrome extension: watch every image on a page and POST it to hvaxd.",
   "scripts": {
     "build": "node esbuild.mjs",
+    "test": "npm run build && node tests/background-fallback.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit"
   },

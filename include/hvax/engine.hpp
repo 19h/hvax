@@ -26,6 +26,7 @@ struct Metrics {
   std::atomic<uint64_t> query_emb{0};
   std::atomic<uint64_t> query_img{0};
   std::atomic<uint64_t> query_identity{0};
+  std::atomic<uint64_t> query_template{0};
   std::atomic<uint64_t> query_us_sum{0};
   std::atomic<uint64_t> crops{0};
   std::atomic<uint64_t> cluster_runs{0};
@@ -53,13 +54,17 @@ class Engine {
   std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, int k, float min_score);
   std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, const SearchOptions& opts);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes, int k,
-                                                                     float min_score);
+                                                                     float min_score, bool detect_only = false);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes,
-                                                                     const SearchOptions& opts);
+                                                                     const SearchOptions& opts, bool detect_only = false);
   // Identity mode: people ranked by centroid cosine.
   std::vector<IdentityHit> query_embedding_identities(std::span<const float> vec, int k, float min_score);
   std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> query_image_identities(
       std::span<const uint8_t> bytes, int k, float min_score);
+  std::vector<Hit> query_template(std::span<const Embedding> positive_embeddings,
+                                  std::span<const int64_t> positive_face_ids,
+                                  std::span<const Embedding> negative_embeddings,
+                                  std::span<const int64_t> negative_face_ids, int k, float min_score);
 
   ImageView get_image(int64_t id) const { return gallery_->image(id); }
   ImageView get_image(const std::array<uint8_t, 32>& sha) const;

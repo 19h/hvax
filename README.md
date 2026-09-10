@@ -14,7 +14,7 @@ Python runtime or database required.
 ## Highlights
 
 - SCRFD-10G face detection and ArcFace R50 embeddings via ONNX Runtime
-- Raw-image, single-embedding, and batch-embedding search
+- Raw-image, single-embedding, batch-embedding, and multi-reference template search
 - Identity layer: faces are clustered into people, searches can return people
   instead of faces, and every stored face carries an identity id
 - Per-face quality gate: tiny or low-confidence faces are stored but kept out
@@ -94,7 +94,7 @@ and [macOS build documentation](https://onnxruntime.ai/docs/build/inferencing.ht
 
 ## Quick start
 
-Install platform dependencies, fetch and verify ONNX Runtime and the two pinned
+Install platform dependencies, fetch and verify ONNX Runtime and the pinned
 InsightFace models, build, and test with one command:
 
 ```bash
@@ -242,8 +242,11 @@ use local CPU/GPU/ANE inference while keeping the gallery remote:
 Add `--cuda`, `--coreml`, or `--mps` for accelerated inference. The local
 processor accepts ordinary image bytes at `POST /v1/ingest`, checks the remote
 gallery before inference, and sends the image plus completed embeddings to
-`/v1/ingest/processed`. `GET /v1/stats`
-proxies the remote gallery's authoritative counts. It binds only to loopback by
+`/v1/ingest/processed`. `GET /health`
+reports `jobs` (the `--jobs` HTTP thread-pool size) without contacting the
+gallery. `GET /v1/stats` proxies the remote gallery's authoritative counts and
+adds the same `jobs` field. The Chrome extension reads `jobs` from the ingest
+target and sends that many concurrent POSTs. It binds only to loopback by
 default; do not expose it to untrusted networks.
 
 ### CUDA client build
@@ -370,13 +373,17 @@ each one:
 ```bash
 curl --data-binary @probe.jpg \
   -H 'Content-Type: image/jpeg' \
-  -H 'X-K: 10' \
+  -H 'X-K: 32' \
   -H 'X-Min-Score: 0.35' \
   http://127.0.0.1:8080/v1/query/image
 ```
 
 The response has the shape `{ "queries": [{ "bbox": ..., "hits": [...] }] }`.
 A probe with no detected faces returns `204 No Content`.
+
+Add `detect_only=1` to extract faces without searching, and
+`include_embedding=1` to include each normalized 512-float embedding in its
+query object. The browser UI uses both flags while building a reference pool.
 
 ### By embedding
 
@@ -385,7 +392,7 @@ Send either 2,048 raw bytes containing 512 little-endian float32 values:
 ```bash
 curl --data-binary @query.f32 \
   -H 'Content-Type: application/octet-stream' \
-  -H 'X-K: 10' \
+  -H 'X-K: 32' \
   -H 'X-Min-Score: 0.35' \
   http://127.0.0.1:8080/v1/query/embedding
 ```
@@ -427,19 +434,43 @@ In identity mode the response is `{ "queries": [{ "bbox": ..., "identities":
 returned unless `X-Include-Low-Quality: 1` is set, which also forces the exact
 tier because those faces are not in the HNSW.
 
+### By reference template
+
+Use a template to combine uploaded face embeddings with confirmed or rejected
+gallery faces:
+
+```json
+{
+  "positive_embeddings": [["512 finite float values"]],
+  "positive_face_ids": [12, 40],
+  "negative_embeddings": [],
+  "negative_face_ids": [91]
+}
+```
+
+Send this JSON to `POST /v1/query/template`. At least one positive reference is
+required, with at most 16 positive and 16 negative references. Results contain
+at most one face per gallery image. Positive similarities are fused with a
+softmax-weighted mean; a negative reference only penalizes a candidate when it
+is more similar to that negative than to the positive pool. Images supplying a
+positive or negative `face_id` are excluded from the returned results. Template
+queries accept `X-K` values up to 256.
+
 ## HTTP API
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/health` | Liveness and gallery summary |
+| `GET` | `/health` | Liveness, gallery summary, and HTTP worker count (`jobs`) |
 | `GET` | `/metrics` | Prometheus text metrics |
-| `GET` | `/v1/stats` | Image, face, embedding-row, and index counts |
+| `GET` | `/v1/stats` | Image, face, embedding-row, index counts, and `jobs` |
 | `POST` | `/v1/ingest` | Detect faces and add an image to the gallery |
+| `POST` | `/v1/ingest/pdf` | Render and ingest the pages of a PDF |
 | `POST` | `/v1/ingest/check` | Check SHA-256 and perceptual hashes before processing |
 | `POST` | `/v1/ingest/processed` | Store an image with client-computed faces and embeddings |
 | `POST` | `/v1/query/image` | Search every face found in an image |
 | `POST` | `/v1/query/embedding` | Search one raw or JSON embedding |
 | `POST` | `/v1/query/embedding/batch` | Search concatenated raw embeddings |
+| `POST` | `/v1/query/template` | Fuse positive and negative reference embeddings/faces |
 | `GET` | `/v1/faces/:id` | Fetch face metadata, quality, and identity |
 | `GET` | `/v1/faces/:id?include_embedding=1` | Fetch face metadata and its embedding |
 | `GET` | `/v1/faces/:id/crop?size=160&pad=0.3` | JPEG crop of a face from its master image |
@@ -472,7 +503,7 @@ Search endpoints accept these optional headers:
 
 | Header | Default | Meaning |
 |---|---:|---|
-| `X-K` | `10` | Maximum hits per query face or embedding (groups when grouped) |
+| `X-K` | `32` | Maximum hits per query face, embedding, or template (groups when grouped) |
 | `X-Min-Score` | `0.35` | Minimum cosine-similarity score (`--min-score`) |
 | `X-Mode` | `faces` | `faces`, `range` (all hits above the floor), or `identity` (people) |
 | `X-Group-By` | — | `identity` collapses hits to the best face per person |
@@ -480,9 +511,25 @@ Search endpoints accept these optional headers:
 | `X-Count` | inferred | Number of embeddings in a batch body |
 
 Ingest and image-query bodies may be raw encoded images or multipart uploads.
-The maximum request size is 20 MiB, and decoded images above 40 megapixels are
-rejected. JPEG, PNG, and WebP are recognized for stored MIME metadata, subject
-to the codecs available in OpenCV.
+The maximum request size is 20 MiB, and decoded images above 100 megapixels are
+rejected by default. Override the decoded-pixel ceiling with `--max-pixels` on
+both the CLI and server. JPEG, PNG, and WebP are recognized for stored MIME
+metadata, subject to the codecs available in OpenCV.
+
+PDF ingest accepts a raw or multipart PDF up to the same 20 MiB request limit.
+It uses Poppler to render at most 64 pages and ingests each page as an
+independent JPEG. For a one-page PDF containing one raster image, it extracts
+the original image, ignores sparse scanner noise while trimming whitespace,
+and probes all four orientations before ingest. `make setup` installs Poppler;
+installations assembled manually must provide `pdftoppm` and `pdfimages` on the
+server's `PATH`. The response reports `stored`, `no_face`, or `error` for each
+page:
+
+```bash
+curl --data-binary @photos.pdf \
+  -H 'Content-Type: application/pdf' \
+  http://127.0.0.1:8080/v1/ingest/pdf
+```
 
 Processed ingest requires multipart fields named `image` and `payload`. The
 JSON payload is versioned and has this shape:
@@ -521,12 +568,12 @@ Common response statuses:
 |---:|---|
 | `200` | Request succeeded |
 | `204` | No face was found, or a delete succeeded |
-| `400` | Empty ingest body or malformed embedding input |
+| `400` | Empty ingest body or malformed embedding/template input |
 | `401` | Missing or incorrect API key |
 | `404` | Image or face ID does not exist |
 | `413` | The submitted image or processed payload is too large |
 | `415` | Ingest body could not be decoded as an image |
-| `422` | A processed-ingest payload failed validation |
+| `422` | A processed-ingest payload or template reference failed validation |
 
 ### Authentication and exposure
 
@@ -792,6 +839,11 @@ npm --prefix extension run build
 
 hvax source code is available under the [MIT License](LICENSE).
 
-The downloaded `det_10g.onnx` and `w600k_r50.onnx` weights are separately
+The downloader also fetches `inswapper_128.onnx` for the sibling movax tool.
+movax's `scripts/extract_inswapper_emap.py` derives the accompanying
+`inswapper_128.emap.f32` projection from that model.
+
+The downloaded `det_10g.onnx`, `w600k_r50.onnx`, and `inswapper_128.onnx`
+weights are separately
 licensed by InsightFace for non-commercial research. They are not covered by
 the MIT license. Contact the model publisher for commercial licensing.

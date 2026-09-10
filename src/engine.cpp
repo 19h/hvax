@@ -409,7 +409,8 @@ std::vector<std::vector<Hit>> Engine::query_embedding_batch(std::span<const floa
 }
 
 std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::span<const uint8_t> bytes,
-                                                                           const SearchOptions& opts_in) {
+                                                                           const SearchOptions& opts_in,
+                                                                           bool detect_only) {
   metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
   cv::Mat img = decode_image(bytes, cfg_.max_pixels);
   if (img.empty()) return {};
@@ -419,18 +420,63 @@ std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::
   SearchOptions opts = opts_in;
   if (opts.k <= 0) opts.k = cfg_.default_k;
   for (auto& f : faces) {
-    auto hits = gallery_->search(f.embedding.data(), opts);
+    auto hits = detect_only ? std::vector<Hit>{} : gallery_->search(f.embedding.data(), opts);
     out.emplace_back(std::move(f), std::move(hits));
   }
   return out;
 }
 
 std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::span<const uint8_t> bytes, int k,
-                                                                           float min_score) {
+                                                                           float min_score, bool detect_only) {
   SearchOptions o;
   o.k = k;
   o.min_score = min_score;
-  return query_image(bytes, o);
+  return query_image(bytes, o, detect_only);
+}
+
+std::vector<Hit> Engine::query_template(std::span<const Embedding> positive_embeddings,
+                                        std::span<const int64_t> positive_face_ids,
+                                        std::span<const Embedding> negative_embeddings,
+                                        std::span<const int64_t> negative_face_ids, int k,
+                                        float min_score) {
+  metrics_.query_template.fetch_add(1, std::memory_order_relaxed);
+  const auto started = std::chrono::steady_clock::now();
+
+  std::vector<Embedding> positives(positive_embeddings.begin(), positive_embeddings.end());
+  std::vector<Embedding> negatives(negative_embeddings.begin(), negative_embeddings.end());
+  std::vector<int64_t> excluded_image_ids;
+  excluded_image_ids.reserve(positive_face_ids.size() + negative_face_ids.size());
+
+  auto append_faces = [&](std::span<const int64_t> face_ids, std::vector<Embedding>& embeddings) {
+    for (const int64_t face_id : face_ids) {
+      const auto face = gallery_->face(face_id);
+      Embedding embedding{};
+      if (!gallery_->face_embedding(face_id, embedding)) throw std::runtime_error("no face");
+      embeddings.push_back(embedding);
+      excluded_image_ids.push_back(face.image_id);
+    }
+  };
+  append_faces(positive_face_ids, positives);
+  append_faces(negative_face_ids, negatives);
+
+  auto normalize_all = [](std::vector<Embedding>& embeddings) {
+    for (auto& embedding : embeddings) {
+      double norm2 = 0.0;
+      for (const float value : embedding) norm2 += static_cast<double>(value) * value;
+      if (!std::isfinite(norm2) || norm2 <= 0.0) throw std::invalid_argument("invalid reference embedding");
+      l2_normalize(embedding.data());
+    }
+  };
+  normalize_all(positives);
+  normalize_all(negatives);
+  if (positives.empty()) throw std::invalid_argument("at least one positive reference is required");
+  if (k <= 0) k = cfg_.default_k;
+
+  auto hits = gallery_->search_template(positives, negatives, excluded_image_ids, k, min_score);
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+  metrics_.query_us_sum.fetch_add(static_cast<uint64_t>(elapsed), std::memory_order_relaxed);
+  return hits;
 }
 
 std::vector<IdentityHit> Engine::query_embedding_identities(std::span<const float> vec, int k, float min_score) {
@@ -499,6 +545,7 @@ std::string Engine::prometheus() const {
   o << "hvax_master_replace_total " << metrics_.master_replace.load() << "\n";
   o << "hvax_query_total{type=\"embedding\"} " << metrics_.query_emb.load() << "\n";
   o << "hvax_query_total{type=\"image\"} " << metrics_.query_img.load() << "\n";
+  o << "hvax_query_total{type=\"template\"} " << metrics_.query_template.load() << "\n";
   o << "hvax_query_microseconds_sum " << metrics_.query_us_sum.load() << "\n";
   o << "hvax_query_total{type=\"identity\"} " << metrics_.query_identity.load() << "\n";
   o << "hvax_crop_total " << metrics_.crops.load() << "\n";

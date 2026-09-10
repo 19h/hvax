@@ -227,6 +227,80 @@
   label.num input:focus { border-color: var(--cyan); }
   #searchopts[hidden] { display: none; }
   #searchopts { display: contents; }
+  .query-actions { display: flex; align-items: center; gap: 0.5rem; }
+  .query-actions[hidden] { display: none; }
+  .action {
+    border: 1px solid var(--cyan);
+    background: color-mix(in srgb, var(--cyan) 10%, transparent);
+    color: var(--cyan);
+    font: inherit;
+    padding: 0.3rem 0.7rem;
+    cursor: pointer;
+  }
+  .action.ghost { border-color: var(--line); background: transparent; color: var(--mute); }
+  .action:disabled { opacity: 0.4; cursor: default; }
+  .refs {
+    display: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 0.7rem 0.8rem;
+  }
+  .refs.show { display: grid; gap: 0.65rem; }
+  .ref-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 0.55rem; }
+  .ref-card, .feedback-chip {
+    position: relative;
+    border: 1px solid var(--line);
+    background: #070b10;
+    padding: 0.4rem;
+    min-width: 0;
+  }
+  .ref-card:hover, .ref-card:focus-within { z-index: 20; }
+  .ref-card.remove, .feedback-chip.remove { opacity: 0.45; border-style: dashed; }
+  .ref-card.pending, .feedback-chip.pending { border-color: var(--hot); }
+  .ref-preview {
+    display: block;
+    position: relative;
+    width: 100%;
+    border: 0;
+    background: #000;
+    padding: 0;
+    cursor: crosshair;
+    transform-origin: var(--zoom-x, 50%) var(--zoom-y, 50%);
+    transition: transform 140ms ease, box-shadow 140ms ease;
+  }
+  .ref-preview img { display: block; width: 100%; height: 105px; object-fit: contain; }
+  .ref-preview.zoomable:hover, .ref-preview.zoomable:focus-visible {
+    transform: scale(2.5);
+    z-index: 30;
+    box-shadow: 0 0 0 1px var(--cyan), 0 12px 34px #000d;
+  }
+  .ref-meta { display: flex; justify-content: space-between; gap: 0.4rem; margin-top: 0.35rem; color: var(--mute); font-size: 11px; }
+  .ref-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bright); }
+  .ref-remove { border: 0; background: none; color: var(--warn); font: inherit; cursor: pointer; padding: 0; }
+  .face-choices { display: flex; flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
+  .face-choices button, .hit-actions button {
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--mute);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 0.17rem 0.35rem;
+  }
+  .face-choices button.on, .hit-actions button.positive { border-color: var(--cyan); color: var(--cyan); }
+  .face-choices button.has-thumb { display: grid; gap: 0.22rem; padding: 0.22rem; text-align: center; }
+  .face-choices button.has-thumb img {
+    display: block;
+    width: 64px;
+    height: 64px;
+    object-fit: cover;
+    background: #000;
+  }
+  .hit-actions button.negative { border-color: var(--hot); color: var(--hot); }
+  .feedback-row { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .feedback-chip { display: flex; align-items: center; gap: 0.4rem; color: var(--mute); font-size: 11px; }
+  .feedback-chip.positive { border-color: var(--cyan); }
+  .feedback-chip.negative { border-color: var(--hot); }
   #out {
     display: none;
     border: 1px solid var(--line);
@@ -255,6 +329,19 @@
     display: block;
     background: #000;
   }
+  .ingest-list { display: grid; gap: 0.45rem; }
+  .ingest-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.65rem;
+    border-top: 1px solid var(--line);
+    padding-top: 0.4rem;
+  }
+  .ingest-item:first-child { border-top: 0; padding-top: 0; }
+  .ingest-item .name { color: var(--bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ingest-item .state { color: var(--mute); text-align: right; }
+  .ingest-item.error .state { color: var(--warn); }
+  .ingest-item.stored .state { color: var(--cyan); }
   .kv { display: grid; gap: 0.15rem; min-width: 0; }
   .kv div { display: grid; grid-template-columns: 7.5rem minmax(0, 1fr); gap: 0.4rem; }
   .kv dt, .k { color: var(--mute); }
@@ -264,17 +351,35 @@
   .q:first-child { border-top: 0; padding-top: 0; }
   .hit {
     display: grid;
-    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-columns: 48px minmax(0, 1fr) auto;
     gap: 0.55rem;
     align-items: center;
+    position: relative;
   }
-  .hit a { display: block; line-height: 0; }
+  .hit:hover, .hit:focus-within { z-index: 20; }
+  .hit-media {
+    display: block;
+    width: 48px;
+    height: 48px;
+    line-height: 0;
+    position: relative;
+  }
   .hit img {
     width: 48px;
     height: 48px;
     object-fit: cover;
     background: #000;
     display: block;
+    position: relative;
+    transform-origin: left center;
+    transition: transform 140ms ease, box-shadow 140ms ease, opacity 120ms ease;
+  }
+  .hit img.loading { opacity: 0.45; }
+  .hit img.load-failed { opacity: 0.55; box-shadow: inset 0 0 0 1px var(--warn); }
+  .hit-media:hover img, .hit-media:focus-visible img {
+    transform: scale(4);
+    z-index: 30;
+    box-shadow: 0 0 0 1px var(--cyan), 0 12px 34px #000d;
   }
   .bar {
     height: 3px;
@@ -287,6 +392,7 @@
     background: var(--cyan);
     width: 0;
   }
+  .hit-actions { display: flex; gap: 0.3rem; }
   .eps {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -350,10 +456,27 @@
   footer a { color: var(--cyan); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
   .err { color: var(--warn); }
+  @media (max-width: 560px) {
+    main { width: calc(100% - 1.2rem); padding-top: 1.1rem; gap: 0.95rem; }
+    .stats { grid-template-columns: 1fr 1fr; }
+    .eps { grid-template-columns: 1fr; }
+    .preview { grid-template-columns: 1fr; }
+    .preview > img, .preview > canvas { max-height: 180px; }
+    .hit { grid-template-columns: 48px minmax(0, 1fr); }
+    .hit-actions { grid-column: 2; }
+    .ref-preview.zoomable:hover, .ref-preview.zoomable:focus-visible { transform: scale(1.5); }
+    .hit-media:hover img, .hit-media:focus-visible img { transform: scale(3); }
+    body { font-size: 12.5px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .live.on i { animation: none; }
+    .ref-preview, .hit img { transition: none; }
+    body::before { display: none; }
+  }
   .hit .more { color: var(--hot); }
   .hit .id { color: var(--cyan); cursor: pointer; }
   .hit .id:hover { text-decoration: underline; }
-  .grid {
+  .people-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
     gap: 0.4rem;
@@ -365,6 +488,7 @@
     background: #000;
     line-height: 0;
     text-decoration: none;
+    padding: 0;
   }
   .pc:hover, .pc:focus-visible { border-color: var(--cyan); outline: none; }
   .pc img {
@@ -437,17 +561,8 @@
   .empty { color: var(--mute); font-size: 12px; }
   .empty[hidden] { display: none; }
   @media (max-width: 560px) {
-    main { width: calc(100% - 1.2rem); padding-top: 1.1rem; gap: 0.95rem; }
     .stats { grid-template-columns: 1fr 1fr 1fr; }
-    .grid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); }
-    .eps { grid-template-columns: 1fr; }
-    .preview { grid-template-columns: 1fr; }
-    .preview > img, .preview > canvas { max-height: 180px; }
-    body { font-size: 12.5px; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .live.on i { animation: none; }
-    body::before { display: none; }
+    .people-grid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); }
   }
 </style>
 </head>
@@ -479,26 +594,27 @@
     </div>
   </section>
 
-  <section class="stage" id="stage" tabindex="0" role="button" aria-label="drop an image to ingest or search">
-    <p class="hint" id="hint"><span id="hinttext">drop a face</span></p>
-    <p class="sub">jpeg / png / webp · paste or click · 20 MiB</p>
+  <section class="stage" id="stage" tabindex="0" role="button" aria-label="paste or drop images or PDFs to ingest, or images to search">
+    <p class="hint" id="hint"><span id="hinttext">add reference images</span></p>
+    <p class="sub" id="uploadhelp">jpeg / png / webp · paste, drop, or click · up to 16 faces</p>
     <div class="controls" id="controls">
       <div class="seg">
-        <button type="button" id="m-in" class="on">ingest</button>
-        <button type="button" id="m-q">search</button>
+        <button type="button" id="m-in">ingest</button>
+        <button type="button" id="m-q" class="on">search</button>
       </div>
-      <span id="searchopts" hidden>
-        <span class="seg" id="qmode">
-          <button type="button" id="q-people" class="on">people</button>
-          <button type="button" id="q-faces">faces</button>
-        </span>
-        <label class="num">k <input id="k" value="10" inputmode="numeric"></label>
+      <span id="searchopts">
+        <label class="num">k <input id="k" value="32" inputmode="numeric"></label>
         <label class="num">min <input id="min" value="0.35" inputmode="decimal"></label>
       </span>
+      <span class="query-actions" id="query-actions">
+        <button type="button" class="action" id="apply" disabled>search</button>
+        <button type="button" class="action ghost" id="clear">clear</button>
+      </span>
     </div>
-    <input id="file" type="file" accept="image/*" hidden>
+    <input id="file" type="file" accept="image/*,application/pdf,.pdf" multiple hidden>
   </section>
 
+  <section class="refs" id="refs"></section>
   <section id="out"></section>
 
   <section id="peoplesec">
@@ -506,7 +622,7 @@
       <h2>people</h2>
       <span><button type="button" id="p-size" class="on">by size</button> · <button type="button" id="p-recent">recent</button> · <button type="button" id="p-more">more</button></span>
     </div>
-    <div class="grid" id="pgrid"></div>
+    <div class="people-grid" id="pgrid"></div>
     <p class="empty" id="pempty" hidden>no identities yet — run <code>hvaxd --cluster</code> or POST /v1/identities/cluster</p>
     <div id="person" hidden></div>
   </section>
@@ -516,10 +632,12 @@
     <div class="eps">
       <a href="/health"><em>GET</em><code>/health</code></a>
       <button class="p" type="button" data-path="/v1/ingest"><em>POST</em><code>/v1/ingest</code></button>
+      <button class="p" type="button" data-path="/v1/ingest/pdf"><em>POST</em><code>/v1/ingest/pdf</code></button>
       <button class="p" type="button" data-path="/v1/ingest/check"><em>POST</em><code>/v1/ingest/check</code></button>
       <button class="p" type="button" data-path="/v1/ingest/processed"><em>POST</em><code>/v1/ingest/processed</code></button>
       <a href="/metrics"><em>GET</em><code>/metrics</code></a>
       <button class="p" type="button" data-path="/v1/query/image"><em>POST</em><code>/v1/query/image</code></button>
+      <button class="p" type="button" data-path="/v1/query/template"><em>POST</em><code>/v1/query/template</code></button>
       <a href="/v1/stats"><em>GET</em><code>/v1/stats</code></a>
       <button class="p" type="button" data-path="/v1/query/embedding"><em>POST</em><code>/v1/query/embedding</code></button>
       <button type="button" data-path="/v1/images/:sha256"><em>GET</em><code>/v1/images/:sha256</code></button>
@@ -529,7 +647,7 @@
       <button type="button" data-path="/v1/identities/:id"><em>GET</em><code>/v1/identities/:id</code></button>
       <button type="button" data-path="/v1/identities/:id/faces"><em>GET</em><code>/v1/identities/:id/faces</code></button>
       <button type="button" data-path="/v1/identities/:id/cooccurring"><em>GET</em><code>/v1/identities/:id/cooccurring</code></button>
-      <button type="button" class="p" data-path="/v1/identities/cluster"><em>POST</em><code>/v1/identities/cluster</code></button>
+      <button class="p" type="button" data-path="/v1/identities/cluster"><em>POST</em><code>/v1/identities/cluster</code></button>
     </div>
   </section>
 
@@ -549,11 +667,32 @@
 (function () {
   const $ = (id) => document.getElementById(id);
   const live = $("live"), ltext = $("ltext"), hostEl = $("host");
-  const stage = $("stage"), fileEl = $("file"), out = $("out");
+  const stage = $("stage"), fileEl = $("file"), refsEl = $("refs"), out = $("out");
   const keyEl = $("key"), keyRow = $("keyrow"), copyBtn = $("copy");
   const thumbs = new Map();
-  let mode = "ingest";
-  let qmode = "people";
+  const thumbPromises = new Map();
+  const cropThumbs = new Map();
+  const imageRequestQueue = [];
+  const MAX_IMAGE_REQUESTS = 4;
+  const references = [];
+  const appliedPositive = new Set();
+  const appliedNegative = new Set();
+  const draftLabels = new Map();
+  const feedbackMeta = new Map();
+  let mode = "query";
+  let nextReferenceId = 1;
+  let results = [];
+  let hasSearched = false;
+  let searchBusy = false;
+  let searchError = "";
+  let lastSearchMs = 0;
+  let activeSearch = null;
+  let activeImageRequests = 0;
+  let thumbGeneration = 0;
+  let resultThumbObserver = null;
+  let ingestBatchGeneration = 0;
+  let pulseToken = 0;
+  const cropUrls = new Map();
   let psort = "size";
   let plimit = 24;
 
@@ -584,9 +723,8 @@
     let s = "curl --data-binary @face.jpg \\\n     -H 'Content-Type: image/jpeg'";
     if (k) s += " \\\n     -H 'X-API-Key: " + k + "'";
     if (mode === "query") {
-      s += " \\\n     -H 'X-K: " + ($("k").value || "10") + "'";
+      s += " \\\n     -H 'X-K: " + ($("k").value || "32") + "'";
       s += " \\\n     -H 'X-Min-Score: " + ($("min").value || "0.35") + "'";
-      s += qmode === "people" ? " \\\n     -H 'X-Mode: identity'" : " \\\n     -H 'X-Group-By: identity'";
     }
     s += " \\\n     " + origin + path;
     return s;
@@ -594,18 +732,27 @@
   function paintCurl() { $("curl").textContent = curlText(); }
 
   function setMode(m) {
+    if (mode !== m) ingestBatchGeneration++;
     mode = m;
     $("m-in").classList.toggle("on", m === "ingest");
     $("m-q").classList.toggle("on", m === "query");
     $("searchopts").hidden = m !== "query";
-    $("hinttext").textContent = m === "ingest" ? "drop a face" : (qmode === "people" ? "find this person" : "search by face");
+    $("query-actions").hidden = m !== "query";
+    fileEl.multiple = true;
+    fileEl.accept = "image/*,application/pdf,.pdf";
+    $("hinttext").textContent = m === "ingest" ? "add photos or PDFs" : "add reference images";
+    $("uploadhelp").textContent = m === "ingest" ? "jpeg / png / webp / pdf · paste, drop, or click · 20 MiB each" :
+      "jpeg / png / webp / pdf · paste, drop, or click · up to 16 faces";
+    fileEl.value = "";
+    if (m === "query") {
+      renderReferences();
+      renderSearchResults();
+    } else {
+      refsEl.className = "refs";
+      out.className = "";
+      out.innerHTML = "";
+    }
     paintCurl();
-  }
-  function setQMode(m) {
-    qmode = m;
-    $("q-people").classList.toggle("on", m === "people");
-    $("q-faces").classList.toggle("on", m === "faces");
-    setMode(mode);
   }
 
   async function refresh() {
@@ -636,15 +783,18 @@
     $("n-index").textContent = j.hnsw ? "hnsw" : "exact";
   }
 
-  // Face crops carry the API key header, so fetch them into blob URLs.
+  // ---- people (identity layer) ----
   async function crop(faceId, size) {
     const key = faceId + "@" + size;
-    if (thumbs.has(key)) return thumbs.get(key);
+    if (cropUrls.has(key)) return cropUrls.get(key);
     try {
-      const r = await fetch("/v1/faces/" + faceId + "/crop?size=" + size, { headers: keyHdr() });
-      if (!r.ok) return "";
-      const u = URL.createObjectURL(await r.blob());
-      thumbs.set(key, u);
+      const blob = await scheduleImageRequest(async () => {
+        const r = await fetch("/v1/faces/" + faceId + "/crop?size=" + size, { headers: keyHdr() });
+        if (!r.ok) throw new Error("crop " + r.status);
+        return r.blob();
+      });
+      const u = URL.createObjectURL(blob);
+      cropUrls.set(key, u);
       return u;
     } catch (e) { return ""; }
   }
@@ -658,27 +808,25 @@
     const d = new Date(Number(ms));
     return isNaN(d) ? "—" : d.toISOString().slice(0, 10);
   }
-  function label(p) {
+  function personLabel(p) {
     return p.name ? esc(p.name) : "#" + esc(p.identity_id);
   }
   function bindOpen(root, sel) {
     for (const el of root.querySelectorAll(sel)) {
-      const open = (e) => { e.preventDefault(); openPerson(Number(el.getAttribute("data-id"))); };
+      const open = (e) => { e.preventDefault(); e.stopPropagation(); openPerson(Number(el.getAttribute("data-id"))); };
       el.addEventListener("click", open);
       el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(e); });
     }
   }
-
-  async function api(path) {
+  async function api(path, init) {
     if (location.protocol === "file:") return null;
     try {
-      const r = await fetch(path, { headers: keyHdr(), cache: "no-store" });
+      const r = await fetch(path, Object.assign({ headers: keyHdr(), cache: "no-store" }, init || {}));
       if (r.status === 401) { keyRow.classList.add("show", "need"); return null; }
       if (!r.ok) return null;
       return await r.json();
     } catch (e) { return null; }
   }
-
   async function loadPeople() {
     const j = await api("/v1/identities?sort=" + psort + "&limit=" + plimit);
     const grid = $("pgrid");
@@ -687,14 +835,13 @@
     $("pempty").hidden = list.length > 0;
     let html = "";
     for (const p of list) {
-      html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(p.identity_id) + "' title='" + label(p) + " · " + esc(p.size) + " faces'>"
+      html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(p.identity_id) + "' title='" + personLabel(p) + " · " + esc(p.size) + " faces'>"
         + "<img alt='' data-face='" + esc(p.rep_face_id) + "' data-size='96'><b>" + esc(p.size) + "</b></div>";
     }
     grid.innerHTML = html;
     fillCrops(grid);
     bindOpen(grid, ".pc");
   }
-
   async function openPerson(id) {
     const box = $("person");
     box.hidden = false;
@@ -708,22 +855,22 @@
     if (!p) { box.innerHTML = "<div class='phead err'><span>identity " + esc(id) + " not found</span></div>"; return; }
     for (const el of $("pgrid").querySelectorAll(".pc")) el.classList.toggle("on", Number(el.getAttribute("data-id")) === id);
     let html = "<div class='phead'><span><input class='name' id='pname' placeholder='#" + esc(id) + "' value='" + esc(p.name || "") + "' aria-label='name'>"
-      + (p.pinned ? " · pinned" : "") + "</span><span><button type='button' id='p-find'>find similar</button> · <button type='button' id='p-close'>close</button></span></div>";
+      + (p.pinned ? " · pinned" : "") + "</span><span><button type='button' id='p-find'>use as reference</button> · <button type='button' id='p-close'>close</button></span></div>";
     html += "<div class='kv'>"
       + row("identity", "#" + esc(p.identity_id))
       + row("faces", esc(p.size) + " in " + esc(p.n_images) + " image" + (p.n_images === 1 ? "" : "s"))
       + row("cohesion", Number(p.cohesion).toFixed(3))
       + row("seen", when(p.first_seen) + " → " + when(p.last_seen))
       + "</div>";
-    html += "<h3>faces</h3><div class='grid' id='pfaces'>";
+    html += "<h3>faces</h3><div class='people-grid' id='pfaces'>";
     for (const f of (faces && faces.faces) || []) {
-      html += "<a class='pc' href='/v1/faces/" + esc(f.face_id) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
+      html += "<a class='pc' href='" + (f.sha256 ? "/v1/images/" + esc(f.sha256) : "/v1/faces/" + esc(f.face_id)) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
         + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'><b>" + Number(f.score).toFixed(2) + "</b></a>";
     }
     html += "</div>";
     const cos = (co && co.cooccurring) || [];
     if (cos.length) {
-      html += "<h3>seen with</h3><div class='grid' id='pco'>";
+      html += "<h3>seen with</h3><div class='people-grid' id='pco'>";
       for (const c of cos) {
         html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(c.identity_id) + "' title='" + (c.name ? esc(c.name) : "#" + esc(c.identity_id)) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + "'>"
           + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
@@ -734,24 +881,15 @@
     fillCrops(box);
     bindOpen(box, "#pco .pc");
     $("p-close").addEventListener("click", () => { box.hidden = true; box.innerHTML = ""; });
-    $("p-find").addEventListener("click", async () => {
-      // search by the identity's representative face embedding
-      const f = await api("/v1/faces/" + p.rep_face_id + "?include_embedding=1");
-      if (!f || !f.embedding) return;
+    $("p-find").addEventListener("click", () => {
+      // the representative face joins the positive reference pool as a stored face
       setMode("query");
-      const t0 = performance.now();
-      const headers = Object.assign({ "Content-Type": "application/json", "X-K": $("k").value || "10", "X-Min-Score": $("min").value || "0.35" }, keyHdr());
-      headers[qmode === "people" ? "X-Mode" : "X-Group-By"] = "identity";
-      const r = await fetch("/v1/query/embedding", { method: "POST", headers, body: JSON.stringify({ embedding: f.embedding }) });
-      const body = r.ok ? await r.json() : {};
-      // normalise to the /v1/query/image shape so render() can draw it
-      const q = qmode === "people" ? { identities: body.identities || [] } : { hits: body.hits || [] };
-      await render({ name: "identity #" + id }, r.status, { queries: [q] }, Math.round(performance.now() - t0), true);
-      out.scrollIntoView({ block: "nearest" });
+      setFeedback(Number(p.rep_face_id), "positive", { image_id: null, identity_id: id });
+      $("apply").scrollIntoView({ block: "nearest" });
     });
     $("pname").addEventListener("change", async () => {
       const name = $("pname").value.trim();
-      await fetch("/v1/identities/" + id, { method: "PATCH", headers: Object.assign({ "Content-Type": "application/json" }, keyHdr()), body: JSON.stringify({ name }) });
+      await api("/v1/identities/" + id, { method: "PATCH", headers: Object.assign({ "Content-Type": "application/json" }, keyHdr()), body: JSON.stringify({ name }) });
       loadPeople();
     });
   }
@@ -766,28 +904,147 @@
     });
   }
 
-  function drawFaces(img, faces) {
+  function drawFaces(img, faces, selected) {
     const c = document.createElement("canvas");
     c.width = img.naturalWidth;
     c.height = img.naturalHeight;
     const ctx = c.getContext("2d");
     ctx.drawImage(img, 0, 0);
     const w = Math.max(2, img.naturalWidth / 420);
-    for (const f of faces || []) {
+    for (let i = 0; i < (faces || []).length; i++) {
+      const f = faces[i];
       const b = f.bbox || [];
       if (b.length === 4) {
-        ctx.strokeStyle = "#41e0ff";
+        ctx.strokeStyle = selected === null && faces.length > 1 ? "#73808c" :
+          selected === undefined || selected < 0 || selected === i ? "#41e0ff" : "#38424c";
         ctx.lineWidth = w;
         ctx.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
       }
-      ctx.fillStyle = "#ff3e9a";
-      for (const p of f.landmarks || []) {
-        ctx.beginPath();
-        ctx.arc(p[0], p[1], w * 1.6, 0, Math.PI * 2);
-        ctx.fill();
+      if (selected === undefined || selected < 0 || selected === i) {
+        ctx.fillStyle = "#ff3e9a";
+        for (const p of f.landmarks || []) {
+          ctx.beginPath();
+          ctx.arc(p[0], p[1], w * 1.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
     return c.toDataURL("image/jpeg", 0.86);
+  }
+
+  function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function pumpImageRequests() {
+    while (activeImageRequests < MAX_IMAGE_REQUESTS && imageRequestQueue.length > 0) {
+      const job = imageRequestQueue.shift();
+      activeImageRequests++;
+      Promise.resolve().then(job.task).then(job.resolve, job.reject).finally(() => {
+        activeImageRequests--;
+        pumpImageRequests();
+      });
+    }
+  }
+
+  function scheduleImageRequest(task) {
+    return new Promise((resolve, reject) => {
+      imageRequestQueue.push({ task, resolve, reject });
+      pumpImageRequests();
+    });
+  }
+
+  function retryableImageStatus(status) {
+    return status === 408 || status === 425 || status === 429 || status >= 500;
+  }
+
+  async function fetchThumbnailOnce(sha256) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch("/v1/images/" + sha256, {
+        headers: keyHdr(), signal: controller.signal
+      });
+      if (response.status === 401) keyRow.classList.add("show", "need");
+      if (!response.ok) {
+        await response.arrayBuffer().catch(() => {});
+        const error = new Error("image HTTP " + response.status);
+        error.status = response.status;
+        throw error;
+      }
+      const blob = await response.blob();
+      if (blob.size === 0) throw new Error("empty image response");
+      return blob;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function fetchThumbnailWithRetry(sha256) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await scheduleImageRequest(() => fetchThumbnailOnce(sha256));
+      } catch (error) {
+        lastError = error;
+        if ((error && error.status && !retryableImageStatus(error.status)) || attempt === 3) break;
+        await delay(250 * Math.pow(2, attempt) + Math.random() * 180);
+      }
+    }
+    throw lastError || new Error("image request failed");
+  }
+
+  async function thumb(sha256) {
+    if (thumbs.has(sha256)) return thumbs.get(sha256);
+    if (thumbPromises.has(sha256)) return thumbPromises.get(sha256);
+    const generation = thumbGeneration;
+    const promise = fetchThumbnailWithRetry(sha256).then((blob) => {
+      if (generation !== thumbGeneration) return "";
+      const url = URL.createObjectURL(blob);
+      thumbs.set(sha256, url);
+      return url;
+    }).catch(() => "").finally(() => {
+      if (thumbPromises.get(sha256) === promise) thumbPromises.delete(sha256);
+    });
+    thumbPromises.set(sha256, promise);
+    return promise;
+  }
+
+  function loadUrl(url) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = reject;
+      image.src = url;
+    });
+  }
+
+  async function faceThumb(sha256, bbox) {
+    const key = sha256 + ":" + (bbox || []).join(",");
+    if (cropThumbs.has(key)) return cropThumbs.get(key);
+    const url = await thumb(sha256);
+    if (!url || !Array.isArray(bbox) || bbox.length !== 4) return url;
+    try {
+      const image = await loadUrl(url);
+      const width = Math.max(1, bbox[2] - bbox[0]);
+      const height = Math.max(1, bbox[3] - bbox[1]);
+      const side = Math.max(width, height) * 1.35;
+      const cx = (bbox[0] + bbox[2]) / 2;
+      const cy = (bbox[1] + bbox[3]) / 2;
+      const x = Math.max(0, Math.min(image.naturalWidth - side, cx - side / 2));
+      const y = Math.max(0, Math.min(image.naturalHeight - side, cy - side / 2));
+      const sw = Math.min(side, image.naturalWidth - x);
+      const sh = Math.min(side, image.naturalHeight - y);
+      const canvas = document.createElement("canvas");
+      canvas.width = 256;
+      canvas.height = 256;
+      canvas.getContext("2d").drawImage(image, x, y, sw, sh, 0, 0, 256, 256);
+      const data = canvas.toDataURL("image/jpeg", 0.9);
+      cropThumbs.set(key, data);
+      return data;
+    } catch (e) {
+      return url;
+    }
   }
 
   function esc(s) {
@@ -800,7 +1057,469 @@
     return "<div><span class='k'>" + esc(k) + "</span><span class='v'>" + v + "</span></div>";
   }
 
-  async function render(file, status, body, ms, noimage) {
+  function baseLabel(faceId) {
+    if (appliedPositive.has(faceId)) return "positive";
+    if (appliedNegative.has(faceId)) return "negative";
+    return null;
+  }
+
+  function desiredLabel(faceId) {
+    return draftLabels.has(faceId) ? draftLabels.get(faceId) : baseLabel(faceId);
+  }
+
+  function desiredFeedback() {
+    const positive = new Set(appliedPositive);
+    const negative = new Set(appliedNegative);
+    for (const [faceId, label] of draftLabels) {
+      positive.delete(faceId);
+      negative.delete(faceId);
+      if (label === "positive") positive.add(faceId);
+      if (label === "negative") negative.add(faceId);
+    }
+    return { positive, negative };
+  }
+
+  function activeReferences() {
+    return references.filter((ref) => !ref.pendingRemove && ref.status === "ready" && ref.selected !== null);
+  }
+
+  function pendingCount() {
+    let count = draftLabels.size;
+    for (const ref of references) {
+      if (ref.pendingRemove || (ref.status === "ready" && ref.selected !== null &&
+          (!ref.applied || ref.appliedSelected !== ref.selected))) count++;
+    }
+    return count;
+  }
+
+  function updateApplyState() {
+    const feedback = desiredFeedback();
+    const active = activeReferences();
+    const unresolved = references.some((ref) => !ref.pendingRemove &&
+      (ref.status === "loading" || (ref.status === "ready" && ref.selected === null)));
+    const positives = active.length + feedback.positive.size;
+    const pending = pendingCount();
+    $("apply").textContent = hasSearched ? (pending ? "apply " + pending : "search again") : "search";
+    $("apply").disabled = searchBusy || unresolved || positives === 0 || positives > 16 || feedback.negative.size > 16;
+  }
+
+  function referencePreview(ref) {
+    if (!ref.image) return "";
+    return drawFaces(ref.image, ref.faces || [], ref.selected);
+  }
+
+  function renderReferences() {
+    if (mode !== "query") return;
+    const feedback = desiredFeedback();
+    const feedbackIds = new Set([...appliedPositive, ...appliedNegative, ...draftLabels.keys()]);
+    const visible = references.length > 0 || feedbackIds.size > 0;
+    refsEl.className = visible ? "refs show" : "refs";
+    if (!visible) {
+      refsEl.innerHTML = "";
+      updateApplyState();
+      return;
+    }
+
+    let html = "<div class='out-h'><strong>reference pool</strong><span>" +
+      (activeReferences().length + feedback.positive.size) + " positive · " + feedback.negative.size +
+      " negative</span></div><div class='ref-grid'>";
+    for (const ref of references) {
+      const changed = ref.pendingRemove || (ref.status === "ready" && ref.selected !== null &&
+        (!ref.applied || ref.appliedSelected !== ref.selected));
+      const cls = "ref-card" + (ref.pendingRemove ? " remove" : "") + (changed ? " pending" : "");
+      html += "<div class='" + cls + "' data-ref-card='" + ref.id + "'>";
+      if (ref.image) {
+        const canZoom = ref.faces && ref.faces.length > 1;
+        html += "<button type='button' class='ref-preview" + (canZoom ? " zoomable" : "") +
+          "' data-ref-preview='" + ref.id + "' aria-label='choose a face from " + esc(ref.file.name) + "'" +
+          (canZoom ? " title='hover to zoom, then click a face'" : "") + "><img alt='' src='" +
+          referencePreview(ref) + "'></button>";
+      }
+      let state = ref.status === "loading" ? "detecting…" : ref.status === "error" ? ref.error :
+        ref.selected === null ? "choose a face" : "face " + (ref.selected + 1);
+      html += "<div class='ref-meta'><span class='ref-name'>" + esc(ref.file.name) + "</span>" +
+        "<button type='button' class='ref-remove' data-ref-remove='" + ref.id + "'>" +
+        (ref.pendingRemove ? "keep" : "remove") + "</button></div>" +
+        "<div class='ref-meta'><span>" + esc(state) + "</span><span>" +
+        (ref.faces ? ref.faces.length + " face" + (ref.faces.length === 1 ? "" : "s") : "") + "</span></div>";
+      const hasFaceThumbnails = ref.faces && ref.faces.some((face) => face.thumbnail);
+      if (ref.faces && (ref.faces.length > 1 || hasFaceThumbnails)) {
+        html += "<div class='face-choices'>";
+        for (let i = 0; i < ref.faces.length; i++) {
+          const thumbnail = ref.faces[i].thumbnail;
+          html += "<button type='button' data-ref-face='" + ref.id + "' data-face-index='" + i + "'" +
+            " class='" + (thumbnail ? "has-thumb " : "") + (ref.selected === i ? "on" : "") + "'>" +
+            (thumbnail ? "<img alt='' src='" + esc(thumbnail) + "'>" : "") +
+            "<span>face " + (i + 1) + "</span></button>";
+        }
+        html += "</div>";
+      }
+      html += "</div>";
+    }
+    html += "</div>";
+
+    if (feedbackIds.size > 0) {
+      html += "<div class='feedback-row'>";
+      for (const faceId of feedbackIds) {
+        const label = desiredLabel(faceId);
+        const base = baseLabel(faceId);
+        if (label === null && base === null) continue;
+        const meta = feedbackMeta.get(faceId) || {};
+        const changed = label !== base;
+        const cls = "feedback-chip " + (label || base || "") + (label === null ? " remove" : "") +
+          (changed ? " pending" : "");
+        html += "<div class='" + cls + "'><span>" + (label === "negative" ? "not person" :
+          label === "positive" ? "match" : "remove") + " · face " + esc(faceId) +
+          (meta.image_id !== undefined ? " · img " + esc(meta.image_id) : "") + "</span>" +
+          "<button type='button' class='ref-remove' data-feedback-remove='" + esc(faceId) + "'>" +
+          (label === null ? "keep" : "remove") + "</button></div>";
+      }
+      html += "</div>";
+    }
+    refsEl.innerHTML = html;
+
+    for (const button of refsEl.querySelectorAll("[data-ref-remove]")) {
+      button.addEventListener("click", () => toggleReferenceRemoval(Number(button.dataset.refRemove)));
+    }
+    for (const button of refsEl.querySelectorAll("[data-ref-face]")) {
+      button.addEventListener("click", () => selectReferenceFace(
+        Number(button.dataset.refFace), Number(button.dataset.faceIndex)));
+    }
+    for (const button of refsEl.querySelectorAll("[data-ref-preview]")) {
+      button.addEventListener("click", (event) => selectReferenceAtPoint(Number(button.dataset.refPreview), event));
+    }
+    for (const button of refsEl.querySelectorAll("[data-feedback-remove]")) {
+      button.addEventListener("click", () => setFeedback(Number(button.dataset.feedbackRemove), null));
+    }
+    updateApplyState();
+  }
+
+  function selectReferenceFace(id, faceIndex) {
+    const ref = references.find((item) => item.id === id);
+    if (!ref || ref.status !== "ready" || !ref.faces[faceIndex]) return;
+    ref.selected = faceIndex;
+    ref.pendingRemove = false;
+    renderReferences();
+  }
+
+  function selectReferenceAtPoint(id, event) {
+    const ref = references.find((item) => item.id === id);
+    if (!ref || !ref.image || !ref.faces || ref.faces.length < 2) return;
+    const image = event.currentTarget.querySelector("img");
+    const rect = image.getBoundingClientRect();
+    const scale = Math.min(rect.width / ref.image.naturalWidth, rect.height / ref.image.naturalHeight);
+    const shownWidth = ref.image.naturalWidth * scale;
+    const shownHeight = ref.image.naturalHeight * scale;
+    const x = (event.clientX - rect.left - (rect.width - shownWidth) / 2) / scale;
+    const y = (event.clientY - rect.top - (rect.height - shownHeight) / 2) / scale;
+    let selected = -1;
+    let smallest = Infinity;
+    for (let i = 0; i < ref.faces.length; i++) {
+      const b = ref.faces[i].bbox || [];
+      const area = (b[2] - b[0]) * (b[3] - b[1]);
+      if (b.length === 4 && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3] && area < smallest) {
+        selected = i;
+        smallest = area;
+      }
+    }
+    if (selected >= 0) selectReferenceFace(id, selected);
+  }
+
+  function toggleReferenceRemoval(id) {
+    const index = references.findIndex((item) => item.id === id);
+    if (index < 0) return;
+    const ref = references[index];
+    if (!ref.applied) references.splice(index, 1);
+    else ref.pendingRemove = !ref.pendingRemove;
+    renderReferences();
+  }
+
+  function setFeedback(faceId, label, meta) {
+    if (meta) feedbackMeta.set(faceId, meta);
+    const current = desiredLabel(faceId);
+    const next = label === null ? (current === null ? baseLabel(faceId) : null) :
+      current === label ? null : label;
+    const feedback = desiredFeedback();
+    const reservedReferences = references.filter((ref) => !ref.pendingRemove && ref.status !== "error").length;
+    if (next === "positive" && current !== "positive" && reservedReferences + feedback.positive.size >= 16) {
+      searchError = "the positive reference pool is limited to 16 faces";
+      renderSearchResults();
+      return;
+    }
+    if (next === "negative" && current !== "negative" && feedback.negative.size >= 16) {
+      searchError = "the negative reference pool is limited to 16 faces";
+      renderSearchResults();
+      return;
+    }
+    const base = baseLabel(faceId);
+    if (next === base) draftLabels.delete(faceId);
+    else draftLabels.set(faceId, next);
+    searchError = "";
+    renderReferences();
+    renderSearchResults();
+  }
+
+  function renderSearchResults() {
+    if (mode !== "query") return;
+    if (resultThumbObserver) {
+      resultThumbObserver.disconnect();
+      resultThumbObserver = null;
+    }
+    if (!hasSearched && !searchError) {
+      out.className = "";
+      out.innerHTML = "";
+      return;
+    }
+    out.className = "show";
+    let html = "<div class='out-h'><strong>" + (searchError ? "search error" : "matches") + "</strong><span>" +
+      (searchBusy ? "working…" : results.length + " images" + (lastSearchMs ? " · " + lastSearchMs + " ms" : "")) +
+      "</span></div>";
+    if (searchError) html += "<div class='err'>" + esc(searchError) + "</div>";
+    if (!searchError && results.length === 0) html += "<div class='out-h'><span>no matches above the minimum score</span></div>";
+    if (results.length > 0) html += "<div class='hits'>";
+    for (const hit of results) {
+      const faceId = Number(hit.face_id);
+      const label = desiredLabel(faceId);
+      const pct = Math.max(0, Math.min(100, Number(hit.score) * 100));
+      html += "<div class='hit' data-face='" + esc(faceId) + "' data-img='" + esc(hit.sha256) + "'>" +
+        "<a class='hit-media' href='/v1/images/" + esc(hit.sha256) +
+        "' target='_blank' rel='noopener' title='hover to zoom · open full image'><img class='loading' alt='matched face' decoding='async'></a><div>" +
+        "<span class='v'>" + Number(hit.score).toFixed(3) + "</span>  img " + esc(hit.image_id) +
+        "  face " + esc(faceId) +
+        (hit.identity_id !== null && hit.identity_id !== undefined
+          ? "  <span class='id' data-id='" + esc(hit.identity_id) + "' title='open person'>#" + esc(hit.identity_id) + "</span>" : "") +
+        (hit.collapsed ? "  <span class='more'>+" + esc(hit.collapsed) + " more</span>" : "") +
+        (hit.low_quality ? "  <span class='k'>low quality</span>" : "") +
+        "<div class='bar'><i style='width:" + pct + "%'></i></div></div>" +
+        "<div class='hit-actions'><button type='button' data-label='positive'" +
+        (label === "positive" ? " class='positive'" : "") + ">match</button>" +
+        "<button type='button' data-label='negative'" + (label === "negative" ? " class='negative'" : "") +
+        ">not my person</button></div></div>";
+    }
+    if (results.length > 0) html += "</div>";
+    out.innerHTML = html;
+    const loadResultThumbnail = (element, hit) => {
+      const image = element.querySelector("img");
+      if (!image || image.dataset.loading === "1") return;
+      image.dataset.loading = "1";
+      image.classList.add("loading");
+      image.classList.remove("load-failed");
+      faceThumb(hit.sha256, hit.bbox).then((url) => {
+        if (!image.isConnected) return;
+        image.classList.remove("loading");
+        if (url) {
+          image.src = url;
+          image.alt = "matched face";
+          image.title = "";
+        } else {
+          image.classList.add("load-failed");
+          image.alt = "image unavailable";
+          image.title = "Image failed after retries; hover to retry";
+        }
+      }).finally(() => { delete image.dataset.loading; });
+    };
+    if (typeof IntersectionObserver === "function") {
+      resultThumbObserver = new IntersectionObserver((entries, observer) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          observer.unobserve(entry.target);
+          const hit = results.find((item) => Number(item.face_id) === Number(entry.target.dataset.face));
+          if (hit) loadResultThumbnail(entry.target, hit);
+        }
+      }, { rootMargin: "320px 0px" });
+    }
+    for (const element of out.querySelectorAll(".hit")) {
+      const hit = results.find((item) => Number(item.face_id) === Number(element.dataset.face));
+      if (resultThumbObserver) resultThumbObserver.observe(element);
+      else loadResultThumbnail(element, hit);
+      element.querySelector(".hit-media").addEventListener("pointerenter", () => {
+        if (element.querySelector("img").classList.contains("load-failed")) loadResultThumbnail(element, hit);
+      });
+      for (const button of element.querySelectorAll("[data-label]")) {
+        button.addEventListener("click", () => setFeedback(Number(hit.face_id), button.dataset.label, hit));
+      }
+    }
+    bindOpen(out, ".hit .id");
+  }
+
+  async function processReference(ref) {
+    try {
+      const pdf = isPdf(ref.file);
+      if (!pdf) ref.image = await loadImg(ref.file);
+      const headers = Object.assign({ "Content-Type": ref.file.type || "application/octet-stream" }, keyHdr());
+      const path = pdf ? "/v1/ingest/pdf?detect_only=1&include_embedding=1" :
+        "/v1/query/image?detect_only=1&include_embedding=1";
+      const response = await fetch(path, {
+        method: "POST", headers: headers, body: ref.file
+      });
+      if (response.status === 401) {
+        keyRow.classList.add("show", "need");
+        throw new Error("unauthorized");
+      }
+      if (response.status === 204) throw new Error("no face detected");
+      const text = await response.text();
+      const body = text ? JSON.parse(text) : {};
+      if (!response.ok) throw new Error(body.error || "HTTP " + response.status);
+      const faces = pdf && Array.isArray(body.pages) ?
+        body.pages.flatMap((page) => Array.isArray(page.faces) ? page.faces : []) :
+        Array.isArray(body.queries) ? body.queries : [];
+      if (faces.length === 0) throw new Error("no face detected");
+      if (faces.some((face) => !Array.isArray(face.embedding) || face.embedding.length !== 512 ||
+          face.embedding.some((value) => !Number.isFinite(Number(value))))) {
+        throw new Error("server did not return valid face embeddings");
+      }
+      ref.faces = faces;
+      if (pdf) {
+        ref.selected = faces.reduce((best, face, index) => {
+          const box = face.bbox || [];
+          const bestBox = faces[best].bbox || [];
+          const area = box.length === 4 ? Math.max(0, box[2] - box[0]) * Math.max(0, box[3] - box[1]) : 0;
+          const bestArea = bestBox.length === 4 ?
+            Math.max(0, bestBox[2] - bestBox[0]) * Math.max(0, bestBox[3] - bestBox[1]) : 0;
+          return area > bestArea ? index : best;
+        }, 0);
+      } else {
+        ref.selected = faces.length === 1 ? 0 : null;
+      }
+      ref.status = "ready";
+    } catch (error) {
+      ref.status = "error";
+      ref.error = error instanceof Error ? error.message : String(error);
+    }
+    renderReferences();
+  }
+
+  async function addReferenceFiles(list) {
+    const files = Array.from(list || []).filter((file) => file && file.size > 0);
+    if (files.length === 0) return;
+    const feedback = desiredFeedback();
+    const reservedReferences = references.filter((ref) => !ref.pendingRemove && ref.status !== "error").length;
+    const available = Math.max(0, 16 - reservedReferences - feedback.positive.size);
+    const accepted = files.slice(0, available);
+    if (accepted.length < files.length) searchError = "the positive reference pool is limited to 16 faces";
+    const added = accepted.map((file) => {
+      const ref = { id: nextReferenceId++, file: file, image: null, faces: null, selected: null,
+        appliedSelected: null, applied: false, pendingRemove: false, status: "loading", error: "" };
+      references.push(ref);
+      return ref;
+    });
+    renderReferences();
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < added.length) {
+        const ref = added[cursor++];
+        await processReference(ref);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, added.length) }, worker));
+  }
+
+  async function applySearch() {
+    if (searchBusy) return;
+    const active = activeReferences();
+    const feedback = desiredFeedback();
+    if (active.length + feedback.positive.size === 0) return;
+    if (references.some((ref) => !ref.pendingRemove &&
+        (ref.status === "loading" || (ref.status === "ready" && ref.selected === null)))) return;
+
+    let k = Number.parseInt($("k").value || "32", 10);
+    const min = Number($("min").value || "0.35");
+    if (!Number.isFinite(k)) k = 32;
+    k = Math.max(1, Math.min(256, k));
+    $("k").value = String(k);
+    if (!Number.isFinite(min)) {
+      searchError = "minimum score must be a finite number";
+      renderSearchResults();
+      return;
+    }
+
+    const payload = {
+      positive_embeddings: active.map((ref) => ref.faces[ref.selected].embedding),
+      positive_face_ids: Array.from(feedback.positive),
+      negative_face_ids: Array.from(feedback.negative)
+    };
+    searchBusy = true;
+    searchError = "";
+    updateApplyState();
+    renderSearchResults();
+    activeSearch?.abort();
+    const controller = new AbortController();
+    activeSearch = controller;
+    const started = performance.now();
+    try {
+      const headers = Object.assign({
+        "Content-Type": "application/json",
+        "X-K": String(k),
+        "X-Min-Score": String(min)
+      }, keyHdr());
+      const response = await fetch("/v1/query/template", {
+        method: "POST", headers: headers, body: JSON.stringify(payload), signal: controller.signal
+      });
+      const text = await response.text();
+      if (activeSearch !== controller) return;
+      const body = text ? JSON.parse(text) : {};
+      if (!response.ok) throw new Error(body.error || "HTTP " + response.status);
+
+      for (let i = references.length - 1; i >= 0; i--) {
+        const ref = references[i];
+        if (ref.pendingRemove) references.splice(i, 1);
+        else if (ref.status === "ready" && ref.selected !== null) {
+          ref.applied = true;
+          ref.appliedSelected = ref.selected;
+        }
+      }
+      appliedPositive.clear();
+      appliedNegative.clear();
+      for (const faceId of feedback.positive) appliedPositive.add(faceId);
+      for (const faceId of feedback.negative) appliedNegative.add(faceId);
+      draftLabels.clear();
+      results = Array.isArray(body.hits) ? body.hits : [];
+      hasSearched = true;
+      lastSearchMs = Math.round(performance.now() - started);
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      if (activeSearch !== controller) return;
+      searchError = error instanceof Error ? error.message : String(error);
+    } finally {
+      if (activeSearch === controller) {
+        searchBusy = false;
+        activeSearch = null;
+        renderReferences();
+        renderSearchResults();
+      }
+    }
+    out.scrollIntoView({ block: "nearest" });
+    refresh();
+  }
+
+  function clearSearch() {
+    activeSearch?.abort();
+    activeSearch = null;
+    if (resultThumbObserver) {
+      resultThumbObserver.disconnect();
+      resultThumbObserver = null;
+    }
+    references.splice(0);
+    appliedPositive.clear();
+    appliedNegative.clear();
+    draftLabels.clear();
+    feedbackMeta.clear();
+    results = [];
+    hasSearched = false;
+    searchBusy = false;
+    searchError = "";
+    lastSearchMs = 0;
+    thumbGeneration++;
+    for (const url of thumbs.values()) URL.revokeObjectURL(url);
+    thumbs.clear();
+    thumbPromises.clear();
+    cropThumbs.clear();
+    fileEl.value = "";
+    renderReferences();
+    renderSearchResults();
+  }
+
+  async function renderIngest(file, status, body, ms) {
     out.className = "show";
     if (status === 204) {
       out.innerHTML = "<div class='out-h'><strong>no face</strong><span>" + esc(file.name) + " · " + ms + " ms</span></div>";
@@ -822,128 +1541,381 @@
     }
 
     let imgSrc = "";
-    if (!noimage) {
-      try {
-        const img = await loadImg(file);
-        const faces = mode === "ingest" ? (body.faces || []) : (body.queries || []);
-        imgSrc = drawFaces(img, faces);
-      } catch (e) {}
+    try {
+      const img = await loadImg(file);
+      imgSrc = drawFaces(img, body.faces || []);
+    } catch (e) {}
+    const faces = body.faces || [];
+    let kv = "<div class='kv'>";
+    kv += row("image_id", esc(body.image_id));
+    kv += row("faces", esc(faces.length));
+    kv += row("size", esc(body.width) + "×" + esc(body.height));
+    kv += row("duplicate", body.duplicate ? esc(body.duplicate_kind || "yes") : "no");
+    kv += row("replaced", body.master_replaced ? "yes" : "no");
+    if (faces[0]) kv += row("det", Number(faces[0].det_score).toFixed(3));
+    const known = faces.filter((f) => f.identity_id !== null && f.identity_id !== undefined);
+    if (faces.length) {
+      kv += row("known", known.length
+        ? known.map((f) => "<span class='id' data-id='" + esc(f.identity_id) + "'>#" + esc(f.identity_id) + "</span>").join(" ")
+        : "no");
     }
-
-    if (mode === "ingest") {
-      const faces = body.faces || [];
-      let kv = "<div class='kv'>";
-      kv += row("image_id", esc(body.image_id));
-      kv += row("faces", esc(faces.length));
-      kv += row("size", esc(body.width) + "×" + esc(body.height));
-      kv += row("duplicate", body.duplicate ? esc(body.duplicate_kind || "yes") : "no");
-      kv += row("replaced", body.master_replaced ? "yes" : "no");
-      if (faces[0]) kv += row("det", Number(faces[0].det_score).toFixed(3));
-      const known = faces.filter((f) => f.identity_id !== null && f.identity_id !== undefined);
-      if (faces.length) {
-        kv += row("known", known.length
-          ? known.map((f) => "<span class='id' data-id='" + esc(f.identity_id) + "'>#" + esc(f.identity_id) + "</span>").join(" ")
-          : "no");
-      }
-      const lowq = faces.filter((f) => f.low_quality).length;
-      if (lowq) kv += row("low quality", esc(lowq) + " not indexed");
-      kv += "</div>";
-      out.innerHTML = "<div class='out-h'><strong>stored</strong><span>" + ms + " ms</span></div>"
-        + "<div class='preview'><img alt='' src='" + imgSrc + "'>" + kv + "</div>";
-      bindOpen(out, ".id");
-      loadPeople();
-      return;
-    }
-
-    const queries = body.queries || [];
-    let html = "<div class='out-h'><strong>search</strong><span>" + queries.length + " quer"
-      + (queries.length === 1 ? "y" : "ies") + " · " + ms + " ms</span></div>";
-    html += "<div class='preview'><img alt='' src='" + imgSrc + "'><div class='hits'>";
-    for (let qi = 0; qi < queries.length; qi++) {
-      const q = queries[qi];
-      const det = q.det_score !== undefined ? " · det " + Number(q.det_score || 0).toFixed(3) : "";
-      if (q.identities) {
-        const ids = q.identities;
-        html += "<div class='q'><div class='out-h'><span>q" + qi + det + "</span><span>" + ids.length + " people</span></div>";
-        for (const p of ids) {
-          const pct = Math.max(0, Math.min(100, Number(p.score) * 100));
-          const bf = p.best_face;
-          html += "<div class='hit'><a href='#' class='id' data-id='" + esc(p.identity_id) + "'><img alt='' data-face='" + esc(bf ? bf.face_id : p.rep_face_id) + "' data-size='96'></a><div>"
-            + "<span class='v'>" + Number(p.score).toFixed(3) + "</span>  <span class='id' data-id='" + esc(p.identity_id) + "'>" + label(p) + "</span>"
-            + "  " + esc(p.size) + " face" + (p.size === 1 ? "" : "s") + " · " + esc(p.n_images) + " img"
-            + (bf ? "  <span class='k'>best face " + esc(bf.face_id) + " " + Number(bf.score).toFixed(3) + "</span>" : "")
-            + "<div class='bar'><i style='width:" + pct + "%'></i></div></div></div>";
-        }
-        html += "</div>";
-        continue;
-      }
-      const hits = q.hits || [];
-      html += "<div class='q'><div class='out-h'><span>q" + qi + det + "</span><span>" + hits.length + " hits</span></div>";
-      for (const h of hits) {
-        const pct = Math.max(0, Math.min(100, Number(h.score) * 100));
-        const who = h.identity_id !== null && h.identity_id !== undefined
-          ? "  <span class='id' data-id='" + esc(h.identity_id) + "'>#" + esc(h.identity_id) + "</span>" : "";
-        const more = h.collapsed ? "  <span class='more'>+" + esc(h.collapsed) + " more</span>" : "";
-        html += "<div class='hit'><a href='/v1/images/" + esc(h.sha256) + "' target='_blank' rel='noopener'><img alt='' data-face='" + esc(h.face_id) + "' data-size='96'></a><div>"
-          + "<span class='v'>" + Number(h.score).toFixed(3) + "</span>  img " + esc(h.image_id)
-          + "  face " + esc(h.face_id) + who + more
-          + (h.low_quality ? "  <span class='k'>low quality</span>" : "")
-          + "<div class='bar'><i style='width:" + pct + "%'></i></div></div></div>";
-      }
-      html += "</div>";
-    }
-    html += "</div></div>";
-    out.innerHTML = html;
-    fillCrops(out);
+    const lowq = faces.filter((f) => f.low_quality).length;
+    if (lowq) kv += row("low quality", esc(lowq) + " not indexed");
+    kv += "</div>";
+    out.innerHTML = "<div class='out-h'><strong>stored</strong><span>" + ms + " ms</span></div>" +
+      "<div class='preview'><img alt='' src='" + imgSrc + "'>" + kv + "</div>";
     bindOpen(out, ".id");
+    loadPeople();
   }
 
-  async function send(file) {
-    if (!file) return;
-    $("hinttext").textContent = "working…";
-    const path = mode === "ingest" ? "/v1/ingest" : "/v1/query/image";
+  function isPdf(file) {
+    return file && (file.type === "application/pdf" || /\.pdf$/i.test(file.name || ""));
+  }
+
+  async function requestIngest(file) {
     const headers = Object.assign({
       "Content-Type": file.type || "application/octet-stream"
     }, keyHdr());
-    if (mode === "query") {
-      headers["X-K"] = $("k").value || "10";
-      headers["X-Min-Score"] = $("min").value || "0.35";
-      headers[qmode === "people" ? "X-Mode" : "X-Group-By"] = "identity";
-    }
     const t0 = performance.now();
     let status = 0, body = "";
     try {
+      const path = isPdf(file) ? "/v1/ingest/pdf" : "/v1/ingest";
       const r = await fetch(path, { method: "POST", headers: headers, body: file });
       status = r.status;
       const text = await r.text();
-      body = text ? JSON.parse(text) : text;
+      try { body = text ? JSON.parse(text) : text; }
+      catch (e) { body = text; }
     } catch (e) {
       status = 0;
       body = String(e);
     }
-    const ms = Math.round(performance.now() - t0);
-    setMode(mode);
-    await render(file, status, body, ms);
+    return { status: status, body: body, ms: Math.round(performance.now() - t0) };
+  }
+
+  async function sendIngest(file) {
+    if (!file) return;
+    $("hinttext").textContent = "working…";
+    const response = await requestIngest(file);
+    $("hinttext").textContent = "add photos or PDFs";
+    await renderIngest(file, response.status, response.body, response.ms);
     out.scrollIntoView({ block: "nearest" });
     refresh();
   }
 
+  function describeIngestResult(item) {
+    if (item.state === "pending") return "queued";
+    if (item.state === "working") return "working…";
+    const response = item.response;
+    if (!response) return "error";
+    if (response.status === 401) return "unauthorized";
+    if (response.status < 200 || response.status >= 300) {
+      return response.body && response.body.error ? response.body.error :
+        response.status ? "error " + response.status : "network error";
+    }
+    if (isPdf(item.file)) {
+      const pages = response.body && Array.isArray(response.body.pages) ? response.body.pages : [];
+      const stored = pages.filter((page) => page.status === "stored").length;
+      const noFace = pages.filter((page) => page.status === "no_face").length;
+      const errors = pages.filter((page) => page.status === "error").length;
+      return pages.length + " pages · " + stored + " stored · " + noFace + " no face" +
+        (errors ? " · " + errors + " errors" : "") + " · " + response.ms + " ms";
+    }
+    if (response.status === 204) return "no face · " + response.ms + " ms";
+    const faces = response.body && Array.isArray(response.body.faces) ? response.body.faces.length : 0;
+    return faces + " face" + (faces === 1 ? "" : "s") + " · " + response.ms + " ms";
+  }
+
+  function renderIngestBatch(items) {
+    const complete = items.filter((item) => item.state === "done").length;
+    out.className = "show";
+    let html = "<div class='out-h'><strong>ingest batch</strong><span>" + complete + " / " +
+      items.length + " complete</span></div><div class='ingest-list'>";
+    for (const item of items) {
+      const response = item.response;
+      const failed = item.state === "done" && (!response || response.status === 0 || response.status === 401 ||
+        response.status >= 300);
+      const stored = item.state === "done" && response && response.status >= 200 && response.status < 300 &&
+        response.status !== 204;
+      html += "<div class='ingest-item" + (failed ? " error" : stored ? " stored" : "") + "'>" +
+        "<span class='name'>" + esc(item.file.name) + "</span><span class='state'>" +
+        esc(describeIngestResult(item)) + "</span></div>";
+    }
+    out.innerHTML = html + "</div>";
+  }
+
+  async function sendIngestBatch(list) {
+    const files = Array.from(list || []).filter((candidate) => candidate && candidate.size > 0);
+    if (files.length === 0) return;
+    if (files.length === 1 && !isPdf(files[0])) {
+      await sendIngest(files[0]);
+      return;
+    }
+    const generation = ++ingestBatchGeneration;
+    const items = files.map((candidate) => ({ file: candidate, state: "pending", response: null }));
+    renderIngestBatch(items);
+    $("hinttext").textContent = "uploading " + items.length + " files…";
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < items.length && generation === ingestBatchGeneration) {
+        const item = items[cursor++];
+        item.state = "working";
+        renderIngestBatch(items);
+        item.response = await requestIngest(item.file);
+        if (generation !== ingestBatchGeneration) return;
+        item.state = "done";
+        if (item.response.status === 401) keyRow.classList.add("show", "need");
+        renderIngestBatch(items);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, items.length) }, worker));
+    if (generation !== ingestBatchGeneration) return;
+    $("hinttext").textContent = "add photos or PDFs";
+    out.scrollIntoView({ block: "nearest" });
+    refresh();
+  }
+
+  function isAcceptedUpload(file) {
+    if (!file || !(file.size > 0)) return false;
+    const type = String(file.type || "").toLowerCase();
+    if (type.startsWith("image/") || type === "application/pdf") return true;
+    if (type && type !== "application/octet-stream") return false;
+    return isPdf(file) || /\.(jpe?g|png|webp|gif|bmp|tif|tiff)$/i.test(file.name || "");
+  }
+
+  function extensionForMime(type, fallback) {
+    type = String(type || "").toLowerCase();
+    if (type === "image/jpeg" || type === "image/jpg") return "jpg";
+    if (type === "image/png") return "png";
+    if (type === "image/webp") return "webp";
+    if (type === "image/gif") return "gif";
+    if (type === "image/bmp") return "bmp";
+    if (type === "application/pdf") return "pdf";
+    return fallback || "png";
+  }
+
+  function namedPasteFiles(files) {
+    return files.map((file, index) => {
+      const name = file.name || "";
+      if (name && !/^image\.(png|jpe?g|gif|webp|bmp)$/i.test(name) && name !== "blob") return file;
+      const ext = extensionForMime(file.type, (name.split(".").pop() || "png").toLowerCase());
+      return new File([file], "paste-" + (index + 1) + "." + ext, {
+        type: file.type || "image/" + (ext === "jpg" ? "jpeg" : ext),
+        lastModified: file.lastModified || Date.now()
+      });
+    });
+  }
+
+  function collectClipboardFiles(dt) {
+    if (!dt) return [];
+    const files = [];
+    const seen = new Set();
+    const add = (file) => {
+      if (!isAcceptedUpload(file)) return;
+      const key = (file.name || "") + "\0" + file.size + "\0" + file.type + "\0" + file.lastModified;
+      if (seen.has(key)) return;
+      seen.add(key);
+      files.push(file);
+    };
+    const list = dt.files;
+    if (list && list.length) {
+      for (let i = 0; i < list.length; i++) add(list[i]);
+    }
+    const items = dt.items;
+    if (items && items.length) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || item.kind !== "file") continue;
+        try { add(item.getAsFile()); } catch (e) {}
+      }
+    }
+    return files;
+  }
+
+  function htmlImageUrls(html) {
+    if (!html) return [];
+    const urls = [];
+    const seen = new Set();
+    const add = (url) => {
+      if (!url) return;
+      url = String(url).trim().replace(/^['"]|['"]$/g, "");
+      if (!url || seen.has(url)) return;
+      if (url.slice(0, 2) === "//") url = location.protocol + url;
+      else if (url.charAt(0) === "/" && url.charAt(1) !== "/") url = location.origin + url;
+      else if (!/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+        try { url = new URL(url, location.href).href; } catch (e) { return; }
+      }
+      if (!/^(https?:|data:image\/|blob:)/i.test(url)) return;
+      seen.add(url);
+      urls.push(url);
+    };
+    if (typeof DOMParser === "function") {
+      try {
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        doc.querySelectorAll("img").forEach((img) => add(img.getAttribute("src")));
+      } catch (e) {}
+    }
+    if (urls.length === 0) {
+      const re = /<img\b[^>]*\bsrc\s*=\s*(?:["']([^"']+)["']|([^\s>]+))/ig;
+      let match;
+      while ((match = re.exec(html))) add(match[1] || match[2] || "");
+    }
+    return urls;
+  }
+
+  function clipboardImageUrls(dt) {
+    if (!dt) return [];
+    const urls = [];
+    const seen = new Set();
+    const add = (url) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      urls.push(url);
+    };
+    let html = "";
+    let uri = "";
+    try { html = dt.getData("text/html") || ""; } catch (e) {}
+    try { uri = dt.getData("text/uri-list") || ""; } catch (e) {}
+    htmlImageUrls(html).forEach(add);
+    String(uri).split(/\r?\n/).forEach((line) => {
+      line = line.trim();
+      if (!line || line.charAt(0) === "#") return;
+      if (/^(https?:|data:image\/|blob:)/i.test(line)) add(line);
+    });
+    return urls;
+  }
+
+  async function fileFromUrl(url, index) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("fetch");
+    const blob = await response.blob();
+    const type = blob.type || "";
+    const ext = extensionForMime(type, "png");
+    const file = new File([blob], "paste-" + (index + 1) + "." + ext, {
+      type: type || "image/" + (ext === "jpg" ? "jpeg" : ext),
+      lastModified: Date.now()
+    });
+    if (!isAcceptedUpload(file)) throw new Error("type");
+    return file;
+  }
+
+  async function filesFromUrls(urls) {
+    const limited = (urls || []).slice(0, 32);
+    const results = await Promise.all(limited.map((url, i) =>
+      fileFromUrl(url, i).then((file) => file, () => null)));
+    return results.filter((file) => file && file.size > 0);
+  }
+
+  async function readClipboardApiFiles() {
+    if (!navigator.clipboard || typeof navigator.clipboard.read !== "function") return [];
+    let items;
+    try { items = await navigator.clipboard.read(); }
+    catch (e) { return []; }
+    const files = [];
+    for (const item of items || []) {
+      const types = item.types || [];
+      const type = types.find((value) => value.startsWith("image/") || value === "application/pdf");
+      if (!type) continue;
+      try {
+        const blob = await item.getType(type);
+        const ext = extensionForMime(type, "png");
+        const file = new File([blob], "paste-" + (files.length + 1) + "." + ext, {
+          type: type,
+          lastModified: Date.now()
+        });
+        if (isAcceptedUpload(file)) files.push(file);
+      } catch (e) {}
+    }
+    return files;
+  }
+
+  function pasteTargetIsTextField(target) {
+    const el = target && target.nodeType === 1 ? target : target && target.parentElement;
+    if (!el || !el.closest) return false;
+    if (el.closest("input, textarea, select, [contenteditable=''], [contenteditable='true']")) return true;
+    return !!el.isContentEditable;
+  }
+
+  function pulseStage() {
+    const token = ++pulseToken;
+    stage.classList.add("drag");
+    window.setTimeout(() => {
+      if (token === pulseToken) stage.classList.remove("drag");
+    }, 220);
+  }
+
+  function applyPastedFiles(files) {
+    const named = namedPasteFiles(files);
+    if (!named.length) return false;
+    pulseStage();
+    onFiles(named);
+    return true;
+  }
+
+  function restoreUploadHint() {
+    $("hinttext").textContent = mode === "ingest" ? "add photos or PDFs" : "add reference images";
+  }
+
+  function onClipboardPaste(e) {
+    const dt = e.clipboardData;
+    if (!dt) return;
+    const inField = pasteTargetIsTextField(e.target);
+    const files = collectClipboardFiles(dt);
+    const urls = clipboardImageUrls(dt);
+    let plain = "";
+    try { plain = String(dt.getData("text/plain") || "").trim(); } catch (e) {}
+    if (inField && plain) return;
+    const takeUrls = (extracted) => {
+      restoreUploadHint();
+      if (extracted.length > 1) applyPastedFiles(extracted);
+      else if (files.length) applyPastedFiles(files);
+      else if (extracted.length) applyPastedFiles(extracted);
+    };
+    // Finder multi-file copy fills `files`; webpage copies often have one bitmap plus HTML <img>s.
+    if (files.length > 1) {
+      e.preventDefault();
+      applyPastedFiles(files);
+      return;
+    }
+    if (urls.length > 1) {
+      e.preventDefault();
+      pulseStage();
+      $("hinttext").textContent = "reading clipboard…";
+      void filesFromUrls(urls).then(takeUrls);
+      return;
+    }
+    if (files.length) {
+      e.preventDefault();
+      applyPastedFiles(files);
+      return;
+    }
+    if (urls.length && !inField) {
+      e.preventDefault();
+      pulseStage();
+      $("hinttext").textContent = "reading clipboard…";
+      void filesFromUrls(urls).then(takeUrls);
+      return;
+    }
+    if (inField || plain) return;
+    void readClipboardApiFiles().then((apiFiles) => { applyPastedFiles(apiFiles); });
+  }
+
   function onFiles(list) {
-    if (list && list[0]) send(list[0]);
+    const files = Array.from(list || []).filter((file) => file && file.size > 0);
+    if (!files.length) return;
+    if (mode === "query") void addReferenceFiles(files);
+    else void sendIngestBatch(files);
+    fileEl.value = "";
   }
 
   $("m-in").addEventListener("click", (e) => { e.stopPropagation(); setMode("ingest"); });
   $("m-q").addEventListener("click", (e) => { e.stopPropagation(); setMode("query"); });
-  $("q-people").addEventListener("click", (e) => { e.stopPropagation(); setQMode("people"); });
-  $("q-faces").addEventListener("click", (e) => { e.stopPropagation(); setQMode("faces"); });
-  $("p-size").addEventListener("click", () => { psort = "size"; plimit = 24; $("p-size").classList.add("on"); $("p-recent").classList.remove("on"); loadPeople(); });
-  $("p-recent").addEventListener("click", () => { psort = "recent"; plimit = 24; $("p-recent").classList.add("on"); $("p-size").classList.remove("on"); loadPeople(); });
-  $("p-more").addEventListener("click", () => { plimit = Math.min(500, plimit + 48); loadPeople(); });
   $("keytoggle").addEventListener("click", () => {
     keyRow.classList.toggle("show");
     if (keyRow.classList.contains("show")) keyEl.focus();
   });
   $("controls").addEventListener("click", (e) => e.stopPropagation());
+  $("apply").addEventListener("click", () => void applySearch());
+  $("clear").addEventListener("click", clearSearch);
   stage.addEventListener("click", () => fileEl.click());
   stage.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileEl.click(); }
@@ -956,16 +1928,16 @@
     stage.addEventListener(ev, (e) => { e.preventDefault(); stage.classList.remove("drag"); });
   });
   stage.addEventListener("drop", (e) => onFiles(e.dataTransfer.files));
-  document.addEventListener("paste", (e) => {
-    const items = e.clipboardData && e.clipboardData.files;
-    onFiles(items);
-  });
+  document.addEventListener("paste", onClipboardPaste);
   keyEl.addEventListener("input", () => {
     try { sessionStorage.setItem("hvax-key", keyEl.value); } catch (e) {}
     paintCurl();
     refresh();
     loadPeople();
   });
+  $("p-size").addEventListener("click", () => { psort = "size"; plimit = 24; $("p-size").classList.add("on"); $("p-recent").classList.remove("on"); loadPeople(); });
+  $("p-recent").addEventListener("click", () => { psort = "recent"; plimit = 24; $("p-recent").classList.add("on"); $("p-size").classList.remove("on"); loadPeople(); });
+  $("p-more").addEventListener("click", () => { plimit = Math.min(500, plimit + 48); loadPeople(); });
   $("k").addEventListener("input", paintCurl);
   $("min").addEventListener("input", paintCurl);
   copyBtn.addEventListener("click", async () => {
@@ -1002,7 +1974,12 @@
     });
   });
 
-  setMode("ingest");
+  window.addEventListener("beforeunload", () => {
+    activeSearch?.abort();
+    for (const url of thumbs.values()) URL.revokeObjectURL(url);
+  });
+
+  setMode("query");
   paintCurl();
   refresh();
   loadPeople();

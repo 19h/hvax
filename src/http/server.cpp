@@ -2,24 +2,45 @@
 
 #include <spdlog/spdlog.h>
 
+#include <cmath>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <unordered_set>
+
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "httplib.h"
 #include "hvax/http/landing_html.hpp"
 #include "hvax/processed.hpp"
 #include "hvax/util/hex.hpp"
 
+extern char** environ;
+
 namespace hvax {
 namespace {
 
 constexpr size_t kMaxProcessedJson = 8 * 1024 * 1024;
 constexpr size_t kMultipartOverhead = 1024 * 1024;
+constexpr size_t kMaxTemplateReferences = 16;
+constexpr int kMaxTemplateResults = 256;
+constexpr int kMaxPdfPages = 64;
 constexpr uint64_t kMaxPageLimit = 500;
 
 nlohmann::json bbox_json(const BBox& b) { return nlohmann::json::array({b.x1, b.y1, b.x2, b.y2}); }
@@ -120,6 +141,46 @@ nlohmann::json impostor_json(const ImpostorReport& r) {
           {"random_same_identity_excess", table(r.random_excess)}};
 }
 
+nlohmann::json detected_face_json(const DetectedFace& face, bool include_embedding) {
+  nlohmann::json result = {{"bbox", bbox_json(face.box)},
+                           {"det_score", face.det_score},
+                           {"landmarks", kps_json(face.kps)},
+                           {"quality", face_quality(face.det_score, face.box)}};
+  if (include_embedding)
+    result["embedding"] = std::vector<float>(face.embedding.begin(), face.embedding.end());
+  return result;
+}
+
+std::string face_thumbnail_data_url(const cv::Mat& image, const BBox& box) {
+  if (image.empty() || !std::isfinite(box.x1) || !std::isfinite(box.y1) ||
+      !std::isfinite(box.x2) || !std::isfinite(box.y2)) {
+    return {};
+  }
+
+  const float width = box.x2 - box.x1;
+  const float height = box.y2 - box.y1;
+  if (width <= 0.0f || height <= 0.0f) return {};
+
+  const float side = std::max(width, height) * 1.5f;
+  const float center_x = (box.x1 + box.x2) * 0.5f;
+  const float center_y = (box.y1 + box.y2) * 0.5f;
+  const int left = std::max(0, static_cast<int>(std::floor(center_x - side * 0.5f)));
+  const int top = std::max(0, static_cast<int>(std::floor(center_y - side * 0.5f)));
+  const int right = std::min(image.cols, static_cast<int>(std::ceil(center_x + side * 0.5f)));
+  const int bottom = std::min(image.rows, static_cast<int>(std::ceil(center_y + side * 0.5f)));
+  if (right <= left || bottom <= top) return {};
+
+  cv::Mat thumbnail;
+  cv::resize(image(cv::Rect(left, top, right - left, bottom - top)), thumbnail,
+             cv::Size(160, 160), 0.0, 0.0, cv::INTER_AREA);
+  std::vector<uint8_t> jpeg;
+  if (!cv::imencode(".jpg", thumbnail, jpeg, {cv::IMWRITE_JPEG_QUALITY, 85}) || jpeg.empty()) {
+    return {};
+  }
+  const std::string raw(reinterpret_cast<const char*>(jpeg.data()), jpeg.size());
+  return "data:image/jpeg;base64," + httplib::detail::base64_encode(raw);
+}
+
 nlohmann::json ingest_json(const IngestResult& r) {
   nlohmann::json faces = nlohmann::json::array();
   for (auto& f : r.faces) faces.push_back(face_json(f));
@@ -160,6 +221,200 @@ std::vector<uint8_t> body_bytes(const httplib::Request& req) {
     return std::vector<uint8_t>(f.content.begin(), f.content.end());
   }
   return std::vector<uint8_t>(req.body.begin(), req.body.end());
+}
+
+bool is_pdf(std::span<const uint8_t> bytes) {
+  constexpr std::string_view signature = "%PDF-";
+  const size_t header_bytes = std::min<size_t>(bytes.size(), 1024);
+  return std::search(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(header_bytes),
+                     signature.begin(), signature.end()) !=
+         bytes.begin() + static_cast<std::ptrdiff_t>(header_bytes);
+}
+
+class TempDirectory {
+ public:
+  TempDirectory() {
+    const auto root = std::filesystem::temp_directory_path();
+    const std::string pattern = (root / "hvax-pdf-XXXXXX").string();
+    std::vector<char> writable(pattern.begin(), pattern.end());
+    writable.push_back('\0');
+    const char* created = ::mkdtemp(writable.data());
+    if (!created) throw std::runtime_error("could not create temporary PDF directory");
+    path_ = created;
+  }
+
+  ~TempDirectory() {
+    std::error_code error;
+    std::filesystem::remove_all(path_, error);
+  }
+
+  const std::filesystem::path& path() const { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+int pdf_page_number(const std::filesystem::path& path) {
+  const std::string stem = path.stem().string();
+  const size_t dash = stem.rfind('-');
+  if (dash == std::string::npos || dash + 1 >= stem.size()) return 0;
+  try {
+    return std::stoi(stem.substr(dash + 1));
+  } catch (...) {
+    return 0;
+  }
+}
+
+int run_pdf_tool(const char* program, std::vector<std::string> arguments) {
+  std::vector<char*> argv;
+  argv.reserve(arguments.size() + 2);
+  argv.push_back(const_cast<char*>(program));
+  for (auto& argument : arguments) argv.push_back(argument.data());
+  argv.push_back(nullptr);
+  posix_spawn_file_actions_t actions;
+  const int actions_result = posix_spawn_file_actions_init(&actions);
+  if (actions_result != 0) return actions_result;
+  posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+  pid_t pid = 0;
+  const int spawned = posix_spawnp(&pid, program, &actions, nullptr, argv.data(), ::environ);
+  posix_spawn_file_actions_destroy(&actions);
+  if (spawned != 0) return spawned;
+
+  int status = 0;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+  while (true) {
+    const pid_t waited = waitpid(pid, &status, WNOHANG);
+    if (waited == pid) break;
+    if (waited < 0 && errno != EINTR) return errno;
+    if (std::chrono::steady_clock::now() >= deadline) {
+      ::kill(pid, SIGKILL);
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+      return ETIMEDOUT;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  if (!WIFEXITED(status)) return EIO;
+  return WEXITSTATUS(status);
+}
+
+int render_pdf(const std::filesystem::path& input, const std::filesystem::path& output_prefix) {
+  return run_pdf_tool("pdftoppm", {"-jpeg", "-r", "144", "-scale-to", "4096", "-f", "1", "-l",
+                                      std::to_string(kMaxPdfPages + 1), input.string(),
+                                      output_prefix.string()});
+}
+
+int extract_pdf_images(const std::filesystem::path& input, const std::filesystem::path& output_prefix) {
+  return run_pdf_tool("pdfimages", {"-j", "-png", "-f", "1", "-l", std::to_string(kMaxPdfPages + 1),
+                                     input.string(), output_prefix.string()});
+}
+
+std::vector<uint8_t> read_file(const std::filesystem::path& path, size_t limit) {
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error || size == 0 || size > limit) return {};
+  std::ifstream input(path, std::ios::binary);
+  if (!input) return {};
+  std::vector<uint8_t> bytes(static_cast<size_t>(size));
+  input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+  if (!input) return {};
+  return bytes;
+}
+
+bool trim_white_margins(std::vector<uint8_t>& bytes, int64_t max_pixels) {
+  const cv::Mat image = decode_image(bytes, max_pixels);
+  if (image.empty() || image.type() != CV_8UC3) return false;
+
+  std::vector<int> column_content(static_cast<size_t>(image.cols), 0);
+  std::vector<int> row_content(static_cast<size_t>(image.rows), 0);
+  constexpr uint8_t kWhiteThreshold = 245;
+  for (int y = 0; y < image.rows; ++y) {
+    const auto* row = image.ptr<cv::Vec3b>(y);
+    for (int x = 0; x < image.cols; ++x) {
+      const auto& pixel = row[x];
+      if (pixel[0] >= kWhiteThreshold && pixel[1] >= kWhiteThreshold &&
+          pixel[2] >= kWhiteThreshold) {
+        continue;
+      }
+      column_content[static_cast<size_t>(x)]++;
+      row_content[static_cast<size_t>(y)]++;
+    }
+  }
+
+  const int minimum_column_content = std::max(3, image.rows / 100);
+  const int minimum_row_content = std::max(3, image.cols / 100);
+  int left = 0;
+  while (left < image.cols && column_content[static_cast<size_t>(left)] < minimum_column_content) left++;
+  int right = image.cols - 1;
+  while (right >= left && column_content[static_cast<size_t>(right)] < minimum_column_content) right--;
+  int top = 0;
+  while (top < image.rows && row_content[static_cast<size_t>(top)] < minimum_row_content) top++;
+  int bottom = image.rows - 1;
+  while (bottom >= top && row_content[static_cast<size_t>(bottom)] < minimum_row_content) bottom--;
+  if (right < left || bottom < top) return false;
+
+  const int x_padding = std::max(4, image.cols / 100);
+  const int y_padding = std::max(4, image.rows / 100);
+  left = std::max(0, left - x_padding);
+  top = std::max(0, top - y_padding);
+  right = std::min(image.cols - 1, right + x_padding);
+  bottom = std::min(image.rows - 1, bottom + y_padding);
+  if (left == 0 && top == 0 && right == image.cols - 1 && bottom == image.rows - 1) return false;
+
+  const cv::Rect content(left, top, right - left + 1, bottom - top + 1);
+  std::vector<uint8_t> cropped;
+  if (!cv::imencode(".jpg", image(content), cropped, {cv::IMWRITE_JPEG_QUALITY, 92}) || cropped.empty()) {
+    return false;
+  }
+  bytes = std::move(cropped);
+  return true;
+}
+
+struct PreparedPdfImage {
+  std::vector<uint8_t> bytes;
+  cv::Mat image;
+  std::vector<DetectedFace> faces;
+  int rotation = 0;
+};
+
+PreparedPdfImage prepare_pdf_image(Engine& engine, std::vector<uint8_t> bytes, int64_t max_pixels) {
+  const cv::Mat original = decode_image(bytes, max_pixels);
+  if (original.empty()) return {};
+
+  PreparedPdfImage best;
+  double best_confidence = -1.0;
+  for (const int rotation : {0, 90, 180, 270}) {
+    cv::Mat candidate;
+    if (rotation == 0)
+      candidate = original;
+    else if (rotation == 90)
+      cv::rotate(original, candidate, cv::ROTATE_90_CLOCKWISE);
+    else if (rotation == 180)
+      cv::rotate(original, candidate, cv::ROTATE_180);
+    else
+      cv::rotate(original, candidate, cv::ROTATE_90_COUNTERCLOCKWISE);
+
+    auto faces = engine.debug_once(candidate);
+    double confidence = 0.0;
+    for (const auto& face : faces) confidence += face.det_score;
+    if (faces.size() < best.faces.size() ||
+        (faces.size() == best.faces.size() && confidence <= best_confidence)) {
+      continue;
+    }
+
+    std::vector<uint8_t> candidate_bytes;
+    if (rotation == 0) {
+      candidate_bytes = bytes;
+    } else if (!cv::imencode(".jpg", candidate, candidate_bytes, {cv::IMWRITE_JPEG_QUALITY, 95})) {
+      continue;
+    }
+    best.bytes = std::move(candidate_bytes);
+    best.image = candidate;
+    best.faces = std::move(faces);
+    best.rotation = rotation;
+    best_confidence = confidence;
+  }
+  return best;
 }
 
 int header_int(const httplib::Request& req, const char* name, int def) {
@@ -225,6 +480,11 @@ QueryOpts query_opts(const httplib::Request& req, const Config& cfg) {
   return q;
 }
 
+void json_error(httplib::Response& res, int status, const std::string& msg) {
+  res.status = status;
+  res.set_content(nlohmann::json{{"error", msg}}.dump(), "application/json");
+}
+
 std::optional<Embedding> parse_embedding_json(const nlohmann::json& j) {
   if (!j.contains("embedding") || !j["embedding"].is_array() || j["embedding"].size() != static_cast<size_t>(kDim))
     return std::nullopt;
@@ -247,9 +507,90 @@ std::optional<Embedding> parse_embedding_body(const httplib::Request& req) {
   }
 }
 
-void json_error(httplib::Response& res, int status, const std::string& msg) {
-  res.status = status;
-  res.set_content(nlohmann::json{{"error", msg}}.dump(), "application/json");
+bool query_flag(const httplib::Request& req, const char* name) {
+  if (!req.has_param(name)) return false;
+  const std::string value = req.get_param_value(name);
+  return value.empty() || value == "1" || value == "true" || value == "yes";
+}
+
+bool parse_embedding_value(const nlohmann::json& value, Embedding& embedding, std::string& error) {
+  if (!value.is_array() || value.size() != static_cast<size_t>(kDim)) {
+    error = "each reference embedding must contain 512 numbers";
+    return false;
+  }
+  double norm2 = 0.0;
+  for (int i = 0; i < kDim; ++i) {
+    const auto& component = value[static_cast<size_t>(i)];
+    if (!component.is_number()) {
+      error = "reference embeddings must contain only numbers";
+      return false;
+    }
+    try {
+      embedding[static_cast<size_t>(i)] = component.get<float>();
+    } catch (...) {
+      error = "reference embedding component is out of range";
+      return false;
+    }
+    const float number = embedding[static_cast<size_t>(i)];
+    if (!std::isfinite(number)) {
+      error = "reference embeddings must contain finite numbers";
+      return false;
+    }
+    norm2 += static_cast<double>(number) * number;
+  }
+  if (!std::isfinite(norm2) || norm2 <= 0.0) {
+    error = "reference embedding norm must be non-zero and finite";
+    return false;
+  }
+  return true;
+}
+
+bool parse_embedding_list(const nlohmann::json& root, const char* name, std::vector<Embedding>& out,
+                          std::string& error) {
+  if (!root.contains(name)) return true;
+  const auto& values = root[name];
+  if (!values.is_array()) {
+    error = std::string(name) + " must be an array";
+    return false;
+  }
+  out.reserve(values.size());
+  for (const auto& value : values) {
+    Embedding embedding{};
+    if (!parse_embedding_value(value, embedding, error)) return false;
+    out.push_back(embedding);
+  }
+  return true;
+}
+
+bool parse_face_ids(const nlohmann::json& root, const char* name, std::vector<int64_t>& out,
+                    std::string& error) {
+  if (!root.contains(name)) return true;
+  const auto& values = root[name];
+  if (!values.is_array()) {
+    error = std::string(name) + " must be an array";
+    return false;
+  }
+  std::unordered_set<int64_t> seen;
+  out.reserve(values.size());
+  for (const auto& value : values) {
+    if (!value.is_number_integer() && !value.is_number_unsigned()) {
+      error = std::string(name) + " must contain integer face IDs";
+      return false;
+    }
+    int64_t face_id = -1;
+    try {
+      face_id = value.get<int64_t>();
+    } catch (...) {
+      error = std::string(name) + " contains an out-of-range face ID";
+      return false;
+    }
+    if (face_id < 0) {
+      error = std::string(name) + " must contain non-negative face IDs";
+      return false;
+    }
+    if (seen.insert(face_id).second) out.push_back(face_id);
+  }
+  return true;
 }
 
 nlohmann::json stats_json(const Engine& engine) {
@@ -264,6 +605,7 @@ nlohmann::json stats_json(const Engine& engine) {
           {"largest_identity", g.largest_identity()},
           {"clustering", g.clustering()},
           {"hnsw", g.hnsw_active()},
+          {"jobs", engine.config().http_threads},
           {"i8_kernel", i8_kernel_name()},
           {"index_min_face_px", engine.config().index_min_face_px},
           {"index_min_det", engine.config().index_min_det},
@@ -272,6 +614,10 @@ nlohmann::json stats_json(const Engine& engine) {
 }
 
 }  // namespace
+
+bool trim_pdf_white_margins(std::vector<uint8_t>& bytes, int64_t max_pixels) {
+  return trim_white_margins(bytes, max_pixels);
+}
 
 void register_routes(Engine& engine, httplib::Server& svr) {
   const Config& cfg = engine.config();
@@ -309,15 +655,18 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       << "embeds      " << g.embedding_rows() << "\n"
       << "identities  " << g.identity_count() << "\n"
       << "index       " << (g.hnsw_active() ? "hnsw" : "exact") << "\n"
+      << "jobs        " << cfg.http_threads << "\n"
       << "\n"
       << "GET    /health\n"
       << "GET    /metrics\n"
       << "GET    /v1/stats\n"
       << "POST   /v1/ingest\n"
+      << "POST   /v1/ingest/pdf\n"
       << "POST   /v1/ingest/check\n"
       << "POST   /v1/ingest/processed\n"
       << "POST   /v1/query/image            (X-Mode: faces|range|identity, X-Group-By: identity)\n"
       << "POST   /v1/query/embedding\n"
+      << "POST   /v1/query/template\n"
       << "GET    /v1/identities\n"
       << "GET    /v1/identities/:id\n"
       << "GET    /v1/identities/:id/faces\n"
@@ -346,7 +695,8 @@ void register_routes(Engine& engine, httplib::Server& svr) {
                         {"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
                         {"identities", engine.gallery().identity_count()},
-                        {"hnsw", engine.gallery().hnsw_active()}};
+                        {"hnsw", engine.gallery().hnsw_active()},
+                        {"jobs", cfg.http_threads}};
     res.set_content(j.dump(), "application/json");
   });
 
@@ -368,6 +718,127 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     if (bytes.size() > cfg.max_upload) return json_error(res, 413, "image exceeds max upload size");
     auto r = engine.ingest(bytes);
     set_ingest_response(r, res);
+  });
+
+  svr.Post("/v1/ingest/pdf", [&, auth](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    const bool detect_only = query_flag(req, "detect_only");
+    const bool include_embedding = query_flag(req, "include_embedding");
+    auto bytes = body_bytes(req);
+    if (bytes.empty()) return json_error(res, 400, "empty body");
+    if (bytes.size() > cfg.max_upload) return json_error(res, 413, "PDF exceeds max upload size");
+    if (!is_pdf(bytes)) return json_error(res, 415, "not a PDF");
+
+    try {
+      TempDirectory temporary;
+      const auto input_path = temporary.path() / "input.pdf";
+      {
+        std::ofstream input(input_path, std::ios::binary);
+        input.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!input) throw std::runtime_error("could not stage PDF upload");
+      }
+
+      const auto output_prefix = temporary.path() / "page";
+      const int rendered = render_pdf(input_path, output_prefix);
+      if (rendered == ENOENT) return json_error(res, 501, "PDF support requires pdftoppm (Poppler) on the server");
+      if (rendered == ETIMEDOUT) return json_error(res, 422, "PDF rendering timed out");
+      if (rendered != 0) return json_error(res, 422, "PDF could not be rendered");
+
+      std::vector<std::filesystem::path> pages;
+      for (const auto& entry : std::filesystem::directory_iterator(temporary.path())) {
+        if (entry.is_regular_file() && entry.path().extension() == ".jpg" &&
+            pdf_page_number(entry.path()) > 0) {
+          pages.push_back(entry.path());
+        }
+      }
+      std::sort(pages.begin(), pages.end(), [](const auto& left, const auto& right) {
+        return pdf_page_number(left) < pdf_page_number(right);
+      });
+      if (pages.empty()) return json_error(res, 422, "PDF contains no renderable pages");
+      if (pages.size() > kMaxPdfPages) return json_error(res, 422, "PDF exceeds the 64-page limit");
+
+      std::vector<std::filesystem::path> embedded_images;
+      const auto embedded_prefix = temporary.path() / "embedded";
+      if (extract_pdf_images(input_path, embedded_prefix) == 0) {
+        for (const auto& entry : std::filesystem::directory_iterator(temporary.path())) {
+          const std::string extension = entry.path().extension().string();
+          const std::string filename = entry.path().filename().string();
+          if (entry.is_regular_file() && filename.starts_with("embedded-") &&
+              (extension == ".jpg" || extension == ".jpeg" || extension == ".png")) {
+            embedded_images.push_back(entry.path());
+          }
+        }
+      }
+
+      nlohmann::json results = nlohmann::json::array();
+      for (const auto& page : pages) {
+        const int number = pdf_page_number(page);
+        const bool use_embedded_image = pages.size() == 1 && embedded_images.size() == 1;
+        auto page_bytes = read_file(use_embedded_image ? embedded_images.front() : page, cfg.max_upload);
+        if (page_bytes.empty()) {
+          results.push_back({{"page", number}, {"status", "error"},
+                             {"error", "rendered page exceeds the image upload limit"}});
+          continue;
+        }
+        const bool cropped = trim_pdf_white_margins(page_bytes, cfg.max_pixels);
+        IngestResult result;
+        int rotation = 0;
+        std::vector<DetectedFace> detected_faces;
+        cv::Mat detected_image;
+        if (use_embedded_image) {
+          auto prepared = prepare_pdf_image(engine, std::move(page_bytes), cfg.max_pixels);
+          rotation = prepared.rotation;
+          if (prepared.image.empty()) {
+            result.status = IngestStatus::bad_image;
+          } else if (detect_only) {
+            detected_image = prepared.image;
+            detected_faces = std::move(prepared.faces);
+          } else {
+            result = engine.ingest_processed(prepared.bytes, prepared.image, prepared.faces);
+          }
+        } else if (detect_only) {
+          detected_image = decode_image(page_bytes, cfg.max_pixels);
+          if (!detected_image.empty()) detected_faces = engine.debug_once(detected_image);
+        } else {
+          result = engine.ingest(page_bytes);
+        }
+        if (detect_only) {
+          nlohmann::json faces = nlohmann::json::array();
+          for (const auto& face : detected_faces) {
+            auto face_result = detected_face_json(face, include_embedding);
+            const std::string thumbnail = face_thumbnail_data_url(detected_image, face.box);
+            if (!thumbnail.empty()) face_result["thumbnail"] = thumbnail;
+            faces.push_back(std::move(face_result));
+          }
+          results.push_back({{"page", number},
+                             {"status", faces.empty() ? "no_face" : "detected"},
+                             {"cropped", cropped},
+                             {"rotation", rotation},
+                             {"source", use_embedded_image ? "embedded_image" : "page"},
+                             {"faces", std::move(faces)}});
+          continue;
+        }
+        if (result.status == IngestStatus::ignored_no_face) {
+          results.push_back({{"page", number}, {"status", "no_face"}, {"cropped", cropped},
+                             {"rotation", rotation}, {"source", use_embedded_image ? "embedded_image" : "page"}});
+        } else if (result.status == IngestStatus::bad_image) {
+          results.push_back({{"page", number}, {"status", "error"},
+                             {"cropped", cropped},
+                             {"rotation", rotation},
+                             {"source", use_embedded_image ? "embedded_image" : "page"},
+                             {"error", "rendered page is not a valid image"}});
+        } else {
+          results.push_back({{"page", number}, {"status", "stored"},
+                             {"cropped", cropped},
+                             {"rotation", rotation},
+                             {"source", use_embedded_image ? "embedded_image" : "page"},
+                             {"result", ingest_json(result)}});
+        }
+      }
+      res.set_content(nlohmann::json{{"pages", results}}.dump(), "application/json");
+    } catch (const std::exception& error) {
+      json_error(res, 500, error.what());
+    }
   });
 
   svr.Post("/v1/ingest/check", [&, auth](const httplib::Request& req, httplib::Response& res) {
@@ -464,13 +935,61 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     res.set_content(nlohmann::json{{"results", arr}}.dump(), "application/json");
   });
 
+  svr.Post("/v1/query/template", [&, auth](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    try {
+      const auto payload = nlohmann::json::parse(req.body);
+      if (!payload.is_object()) return json_error(res, 400, "template body must be a JSON object");
+
+      std::vector<Embedding> positive_embeddings;
+      std::vector<Embedding> negative_embeddings;
+      std::vector<int64_t> positive_face_ids;
+      std::vector<int64_t> negative_face_ids;
+      std::string error;
+      if (!parse_embedding_list(payload, "positive_embeddings", positive_embeddings, error) ||
+          !parse_embedding_list(payload, "negative_embeddings", negative_embeddings, error) ||
+          !parse_face_ids(payload, "positive_face_ids", positive_face_ids, error) ||
+          !parse_face_ids(payload, "negative_face_ids", negative_face_ids, error)) {
+        return json_error(res, 400, error);
+      }
+
+      if (positive_embeddings.size() + positive_face_ids.size() == 0)
+        return json_error(res, 422, "at least one positive reference is required");
+      if (positive_embeddings.size() + positive_face_ids.size() > kMaxTemplateReferences ||
+          negative_embeddings.size() + negative_face_ids.size() > kMaxTemplateReferences) {
+        return json_error(res, 422, "template supports at most 16 positive and 16 negative references");
+      }
+      const std::unordered_set<int64_t> positive_ids(positive_face_ids.begin(), positive_face_ids.end());
+      for (const int64_t face_id : negative_face_ids) {
+        if (positive_ids.contains(face_id))
+          return json_error(res, 422, "a face cannot be both a positive and negative reference");
+      }
+
+      const int k = header_int(req, "X-K", cfg.default_k);
+      const float min_s = header_float(req, "X-Min-Score", cfg.default_min_score);
+      if (k > kMaxTemplateResults || !std::isfinite(min_s))
+        return json_error(res, 422, "X-K must be at most 256 and X-Min-Score must be finite");
+      auto hits = engine.query_template(positive_embeddings, positive_face_ids, negative_embeddings,
+                                        negative_face_ids, k, min_s);
+      nlohmann::json result = nlohmann::json::array();
+      for (const auto& hit : hits) result.push_back(hit_json(hit));
+      res.set_content(nlohmann::json{{"hits", result}}.dump(), "application/json");
+    } catch (const nlohmann::json::exception&) {
+      json_error(res, 400, "bad template JSON");
+    } catch (const std::exception& error) {
+      json_error(res, 422, error.what());
+    }
+  });
+
   svr.Post("/v1/query/image", [&, auth](const httplib::Request& req, httplib::Response& res) {
     if (!auth(req, res)) return;
     auto bytes = body_bytes(req);
     if (bytes.size() > cfg.max_upload) return json_error(res, 413, "image exceeds max upload size");
     const QueryOpts q = query_opts(req, cfg);
+    const bool detect_only = query_flag(req, "detect_only");
+    const bool include_embedding = query_flag(req, "include_embedding");
     nlohmann::json queries = nlohmann::json::array();
-    if (q.identity_mode) {
+    if (q.identity_mode && !detect_only) {
       auto groups = engine.query_image_identities(bytes, q.search.k, q.search.min_score);
       if (groups.empty()) {
         res.status = 204;
@@ -479,14 +998,12 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       for (auto& [face, hits] : groups) {
         nlohmann::json hj = nlohmann::json::array();
         for (auto& h : hits) hj.push_back(identity_hit_json(h));
-        queries.push_back({{"bbox", bbox_json(face.box)},
-                           {"det_score", face.det_score},
-                           {"landmarks", kps_json(face.kps)},
-                           {"quality", face_quality(face.det_score, face.box)},
-                           {"identities", hj}});
+        nlohmann::json query = detected_face_json(face, include_embedding);
+        query["identities"] = std::move(hj);
+        queries.push_back(std::move(query));
       }
     } else {
-      auto groups = engine.query_image(bytes, q.search);
+      auto groups = engine.query_image(bytes, q.search, detect_only);
       if (groups.empty()) {
         res.status = 204;
         return;
@@ -494,11 +1011,9 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       for (auto& [face, hits] : groups) {
         nlohmann::json hj = nlohmann::json::array();
         for (auto& h : hits) hj.push_back(hit_json(h));
-        queries.push_back({{"bbox", bbox_json(face.box)},
-                           {"det_score", face.det_score},
-                           {"landmarks", kps_json(face.kps)},
-                           {"quality", face_quality(face.det_score, face.box)},
-                           {"hits", hj}});
+        nlohmann::json query = detected_face_json(face, include_embedding);
+        query["hits"] = std::move(hj);
+        queries.push_back(std::move(query));
       }
     }
     res.set_content(nlohmann::json{{"queries", queries}}.dump(), "application/json");
@@ -618,6 +1133,10 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     for (size_t i = 0; i < faces.size(); ++i) {
       auto j = face_json(faces[i]);
       j["score"] = scores[i];
+      try {
+        j["sha256"] = to_hex(engine.get_image(faces[i].image_id).sha256);
+      } catch (...) {
+      }
       arr.push_back(j);
     }
     res.set_content(nlohmann::json{{"identity_id", id}, {"faces", arr}, {"offset", offset}, {"limit", limit}}.dump(),
@@ -743,10 +1262,10 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       std::array<uint8_t, 32> sha{};
       if (!sha256_from_string(req.matches[1].str(), sha)) throw std::runtime_error("bad image hash");
       auto path = engine.image_file(sha);
-      std::ifstream in(path, std::ios::binary);
-      if (!in) return json_error(res, 404, "file missing");
-      std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-      res.set_content(body, engine.image_mime(sha));
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec)) return json_error(res, 404, "file missing");
+      res.set_header("Cache-Control", "private, max-age=31536000, immutable");
+      res.set_file_content(path.string(), engine.image_mime(sha));
     } catch (...) {
       json_error(res, 404, "not found");
     }

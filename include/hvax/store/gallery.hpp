@@ -180,6 +180,8 @@ class Gallery {
   ReindexReport reindex();
 
   ImpostorReport impostor_eval(uint64_t max_pairs, uint64_t seed) const;
+  std::vector<Hit> search_template(std::span<const Embedding> positives, std::span<const Embedding> negatives,
+                                   std::span<const int64_t> excluded_image_ids, int k, float min_score) const;
 
   uint64_t live_faces() const;
   uint64_t live_images() const;

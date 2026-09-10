@@ -1,4 +1,11 @@
-import { DEFAULT_SETTINGS, type IngestBytesMessage, type IngestUrlMessage, type Settings } from "./types";
+import {
+  DEFAULT_SETTINGS,
+  type CaptureImageMessage,
+  type CaptureImageResponse,
+  type IngestBytesMessage,
+  type IngestUrlMessage,
+  type Settings,
+} from "./types";
 
 const seen = new Set<string>();
 let settings: Settings = { ...DEFAULT_SETTINGS };
@@ -125,6 +132,23 @@ async function transcodeBlob(blob: Blob, image?: HTMLImageElement): Promise<Blob
   return canvas.convertToBlob({ type: "image/jpeg", quality: 0.92 });
 }
 
+function findImage(url: string): HTMLImageElement | undefined {
+  const visit = (root: ParentNode): HTMLImageElement | undefined => {
+    for (const image of root.querySelectorAll("img")) {
+      if (normalizeUrl(image.currentSrc || image.src) === url) return image;
+    }
+    for (const element of root.querySelectorAll("*")) {
+      const shadow = (element as HTMLElement).shadowRoot;
+      if (shadow) {
+        const found = visit(shadow);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  return visit(document);
+}
+
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -144,6 +168,56 @@ function blobToBase64(blob: Blob): Promise<string> {
     reader.readAsDataURL(blob);
   });
 }
+
+async function captureImage(url: string): Promise<CaptureImageResponse> {
+  const image = findImage(url);
+  let fetchError = "page fetch failed";
+  try {
+    const response = await fetch(url, {
+      credentials: "include",
+      cache: "force-cache",
+      referrer: location.href,
+      referrerPolicy: "strict-origin-when-cross-origin",
+    });
+    if (!response.ok) {
+      fetchError = `page fetch ${response.status}`;
+    } else {
+      let body = await response.blob();
+      if (body.size > settings.maxBytes && image) body = await transcodeBlob(body, image);
+      if (body.size > 0 && body.size <= settings.maxBytes) {
+        return {
+          ok: true,
+          mime: body.type || "application/octet-stream",
+          dataBase64: await blobToBase64(body),
+        };
+      }
+      fetchError = body.size === 0 ? "page fetch returned an empty image" : "page image exceeds max bytes";
+    }
+  } catch (error) {
+    fetchError = error instanceof Error ? error.message : String(error);
+  }
+
+  if (image && image.complete && image.naturalWidth > 0) {
+    try {
+      const body = await transcodeBlob(new Blob(), image);
+      if (body.size > 0 && body.size <= settings.maxBytes) {
+        return { ok: true, mime: body.type || "image/jpeg", dataBase64: await blobToBase64(body) };
+      }
+    } catch {
+      // Cross-origin images without CORS approval taint canvases. The page
+      // fetch above can still succeed when its authenticated context is needed.
+    }
+  }
+  return { ok: false, error: fetchError };
+}
+
+chrome.runtime.onMessage.addListener((message: CaptureImageMessage, _sender, sendResponse) => {
+  if (message?.type !== "capture-image") return false;
+  void captureImage(message.url).then(sendResponse, (error: unknown) => {
+    sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  });
+  return true;
+});
 
 async function sendBytes(url: string, width: number, height: number, image?: HTMLImageElement): Promise<void> {
   let res: Response;
