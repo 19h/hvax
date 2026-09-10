@@ -40,6 +40,7 @@ function render(s: StatusResponse): void {
     ? [
         ["images", s.serverStats.images],
         ["faces", s.serverStats.faces],
+        ["people", s.serverStats.identities ?? "—"],
         ["embedding rows", s.serverStats.embedding_rows],
         ["search", s.serverStats.hnsw ? "HNSW" : "exact"],
       ]
@@ -51,6 +52,8 @@ function render(s: StatusResponse): void {
     ["seen", s.stats.seen],
     ["posted", s.stats.posted],
     ["stored", s.stats.stored],
+    ["faces", s.stats.faces],
+    ["known people", s.stats.known],
     ["dup", s.stats.duplicates],
     ["no face", s.stats.ignored],
     ["errors", s.stats.errors],

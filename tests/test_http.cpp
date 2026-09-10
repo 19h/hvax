@@ -1,9 +1,22 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <filesystem>
+#include <random>
 #include <string_view>
+#include <thread>
+#include <unistd.h>
 
+#include <nlohmann/json.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include "httplib.h"
+#include "hvax/align/umeyama.hpp"
+#include "hvax/embed/arcface.hpp"
+#include "hvax/engine.hpp"
 #include "hvax/http/landing_html.hpp"
+#include "hvax/http/server.hpp"
 #include "hvax/pipeline.hpp"
 #include "hvax/util/hex.hpp"
 
@@ -15,6 +28,8 @@ TEST(Landing, HtmlDocument) {
   EXPECT_NE(html.find("/v1/ingest/check"), std::string_view::npos);
   EXPECT_NE(html.find("/v1/ingest/processed"), std::string_view::npos);
   EXPECT_NE(html.find("/v1/query/image"), std::string_view::npos);
+  EXPECT_NE(html.find("/v1/identities"), std::string_view::npos);
+  EXPECT_NE(html.find("/crop"), std::string_view::npos);
 }
 
 TEST(PipelineHelpers, SniffMime) {
@@ -32,4 +47,264 @@ TEST(HttpHelpers, HashHexRoundTrip) {
   EXPECT_TRUE(hvax::hex64_from_string(encoded, decoded));
   EXPECT_EQ(decoded, expected);
   EXPECT_FALSE(hvax::hex64_from_string("not-a-valid-hash", decoded));
+}
+
+namespace {
+
+std::filesystem::path http_tmpdir() {
+  static std::atomic<int> seq{0};
+  auto p = std::filesystem::temp_directory_path() /
+           ("hvax-http-test-" + std::to_string(::getpid()) + "-" + std::to_string(seq.fetch_add(1)));
+  std::filesystem::create_directories(p);
+  return p;
+}
+
+hvax::Embedding person_embedding(int person, int sample) {
+  std::mt19937 base(1000 + person);
+  std::normal_distribution<float> nd(0.f, 1.f);
+  hvax::Embedding e{};
+  for (auto& x : e) x = nd(base);
+  std::mt19937 rng(static_cast<unsigned>(person * 100003 + sample));
+  for (auto& x : e) x += 0.35f * nd(rng);
+  hvax::l2_normalize(e.data());
+  return e;
+}
+
+hvax::DetectedFace face_at(const hvax::Embedding& e, float x, float y, float size) {
+  hvax::DetectedFace f;
+  f.box = {x, y, x + size, y + size};
+  f.det_score = 0.9f;
+  f.kps = hvax::arcface_dst();
+  f.embedding = e;
+  return f;
+}
+
+cv::Mat photo(int seed) {
+  cv::Mat img(640, 640, CV_8UC3);
+  for (int y = 0; y < 640; ++y)
+    for (int x = 0; x < 640; ++x)
+      img.at<cv::Vec3b>(y, x) = cv::Vec3b(static_cast<uint8_t>(x + seed), static_cast<uint8_t>(y + seed * 2), 80);
+  cv::rectangle(img, {10, 10, 200, 200}, {30, 90, 220}, -1);
+  return img;
+}
+
+void ingest(hvax::Engine& engine, int seed, const std::vector<hvax::DetectedFace>& faces) {
+  cv::Mat img = photo(seed);
+  std::vector<uint8_t> bytes;
+  cv::imencode(".jpg", img, bytes, {cv::IMWRITE_JPEG_QUALITY, 90});
+  auto r = engine.ingest_processed(bytes, img, faces);
+  ASSERT_EQ(r.status, hvax::IngestStatus::stored);
+}
+
+struct LiveServer {
+  hvax::Engine& engine;
+  httplib::Server svr;
+  std::thread thread;
+  int port = 0;
+  explicit LiveServer(hvax::Engine& e) : engine(e) {
+    hvax::register_routes(engine, svr);
+    port = svr.bind_to_any_port("127.0.0.1");
+    thread = std::thread([this] { svr.listen_after_bind(); });
+    svr.wait_until_ready();
+  }
+  ~LiveServer() {
+    svr.stop();
+    thread.join();
+  }
+  httplib::Client client() { return httplib::Client("127.0.0.1", port); }
+};
+
+std::string raw_embedding(const hvax::Embedding& e) {
+  return std::string(reinterpret_cast<const char*>(e.data()), sizeof(float) * hvax::kDim);
+}
+
+}  // namespace
+
+TEST(HttpApi, IdentityRoutesEndToEnd) {
+  auto dir = http_tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.api_key = "secret";
+  cfg.dedup = hvax::DedupMode::sha256;  // fixture photos are near-identical; this test is about identities
+  hvax::Engine engine(cfg);
+  for (int i = 0; i < 3; ++i) {
+    ingest(engine, 10 + i, {face_at(person_embedding(1, i), 10, 10, 200)});
+    ingest(engine, 20 + i, {face_at(person_embedding(2, i), 10, 10, 200)});
+  }
+  ingest(engine, 30, {face_at(person_embedding(1, 9), 10, 10, 200), face_at(person_embedding(2, 9), 300, 300, 200),
+                      face_at(person_embedding(3, 0), 500, 500, 12)});
+
+  LiveServer live(engine);
+  auto c = live.client();
+  const httplib::Headers key = {{"X-API-Key", "secret"}};
+
+  // auth is enforced on the new routes
+  {
+    auto r = c.Get("/v1/identities");
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 401);
+  }
+  // stats carry the identity/quality counters
+  {
+    auto r = c.Get("/v1/stats", key);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200);
+    auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["faces"], 9);
+    EXPECT_EQ(j["indexed_faces"], 8);
+    EXPECT_EQ(j["low_quality_faces"], 1);
+    EXPECT_EQ(j["identities"], 0);
+    EXPECT_EQ(j["unassigned_faces"], 8);
+    EXPECT_TRUE(j.contains("i8_kernel"));
+  }
+  // trigger clustering
+  int64_t id_a = -1, id_b = -1;
+  {
+    auto r = c.Post("/v1/identities/cluster", key, "", "application/json");
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["identities"], 2);
+    EXPECT_EQ(j["faces_assigned"], 8);
+    auto f0 = nlohmann::json::parse(c.Get("/v1/faces/0", key)->body);
+    auto f1 = nlohmann::json::parse(c.Get("/v1/faces/1", key)->body);
+    id_a = f0["identity_id"].get<int64_t>();
+    id_b = f1["identity_id"].get<int64_t>();
+    EXPECT_NE(id_a, id_b);
+    EXPECT_GT(f0["quality"].get<float>(), 0.8f);
+    EXPECT_FALSE(f0["low_quality"].get<bool>());
+    auto f8 = nlohmann::json::parse(c.Get("/v1/faces/8", key)->body);
+    EXPECT_TRUE(f8["low_quality"].get<bool>());
+    EXPECT_TRUE(f8["identity_id"].is_null());
+  }
+  // listing, detail, faces, cooccurring, timeline
+  {
+    auto j = nlohmann::json::parse(c.Get("/v1/identities?sort=size&limit=10", key)->body);
+    EXPECT_EQ(j["total"], 2);
+    ASSERT_EQ(j["identities"].size(), 2u);
+    EXPECT_EQ(j["identities"][0]["size"], 4);
+    auto d = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a), key)->body);
+    EXPECT_EQ(d["size"], 4);
+    EXPECT_EQ(d["n_images"], 4);
+    ASSERT_EQ(d["cooccurring"].size(), 1u);
+    EXPECT_EQ(d["cooccurring"][0]["identity_id"], id_b);
+    EXPECT_EQ(d["cooccurring"][0]["shared_images"], 1);
+    auto f = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/faces?limit=2", key)->body);
+    ASSERT_EQ(f["faces"].size(), 2u);
+    EXPECT_GE(f["faces"][0]["score"].get<float>(), f["faces"][1]["score"].get<float>());
+    auto co = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring", key)->body);
+    ASSERT_EQ(co["cooccurring"].size(), 1u);
+    EXPECT_EQ(co["cooccurring"][0]["size"], 4);
+    auto tl = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/timeline?bucket=day", key)->body);
+    EXPECT_EQ(tl["bucket_ms"], 86400000);
+    ASSERT_GE(tl["buckets"].size(), 1u);
+    auto miss = c.Get("/v1/identities/999", key);
+    EXPECT_EQ(miss->status, 404);
+  }
+  // face search: grouped, identity mode, range, low-quality inclusion
+  {
+    httplib::Headers h = key;
+    h.emplace("X-K", "5");
+    h.emplace("X-Min-Score", "-1");
+    h.emplace("X-Group-By", "identity");
+    auto r = c.Post("/v1/query/embedding", h, raw_embedding(person_embedding(1, 77)), "application/octet-stream");
+    ASSERT_EQ(r->status, 200);
+    auto j = nlohmann::json::parse(r->body);
+    ASSERT_GE(j["hits"].size(), 2u);
+    EXPECT_EQ(j["hits"][0]["identity_id"], id_a);
+    EXPECT_EQ(j["hits"][0]["collapsed"], 3);
+
+    httplib::Headers hi = key;
+    hi.emplace("X-K", "2");
+    hi.emplace("X-Min-Score", "-1");
+    hi.emplace("X-Mode", "identity");
+    r = c.Post("/v1/query/embedding", hi, raw_embedding(person_embedding(1, 78)), "application/octet-stream");
+    ASSERT_EQ(r->status, 200);
+    j = nlohmann::json::parse(r->body);
+    ASSERT_EQ(j["identities"].size(), 2u);
+    EXPECT_EQ(j["identities"][0]["identity_id"], id_a);
+    EXPECT_EQ(j["identities"][0]["best_face"]["identity_id"], id_a);
+
+    httplib::Headers hr = key;
+    hr.emplace("X-K", "1");
+    hr.emplace("X-Min-Score", "0.5");
+    hr.emplace("X-Mode", "range");
+    r = c.Post("/v1/query/embedding", hr, raw_embedding(person_embedding(1, 79)), "application/octet-stream");
+    j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["hits"].size(), 4u);
+
+    httplib::Headers hq = key;
+    hq.emplace("X-Min-Score", "0.5");
+    r = c.Post("/v1/query/embedding", hq, raw_embedding(person_embedding(3, 0)), "application/octet-stream");
+    EXPECT_EQ(nlohmann::json::parse(r->body)["hits"].size(), 0u);
+    hq.emplace("X-Include-Low-Quality", "1");
+    r = c.Post("/v1/query/embedding", hq, raw_embedding(person_embedding(3, 0)), "application/octet-stream");
+    j = nlohmann::json::parse(r->body);
+    ASSERT_EQ(j["hits"].size(), 1u);
+    EXPECT_TRUE(j["hits"][0]["low_quality"].get<bool>());
+  }
+  // crop endpoint returns a decodable square JPEG
+  {
+    auto r = c.Get("/v1/faces/0/crop?size=64", key);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(r->get_header_value("Content-Type"), "image/jpeg");
+    std::vector<uint8_t> bytes(r->body.begin(), r->body.end());
+    cv::Mat img = cv::imdecode(bytes, cv::IMREAD_COLOR);
+    ASSERT_FALSE(img.empty());
+    EXPECT_EQ(img.cols, 64);
+    EXPECT_EQ(img.rows, 64);
+    EXPECT_EQ(c.Get("/v1/faces/12345/crop", key)->status, 404);
+  }
+  // image meta exposes identities
+  {
+    auto im = engine.get_image(7);
+    auto r = c.Get("/v1/images/" + hvax::to_hex(im.sha256) + "/meta", key);
+    ASSERT_EQ(r->status, 200);
+    auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["identities"].size(), 2u);
+    EXPECT_FALSE(j["repeat_identity"].get<bool>());
+  }
+  // curation: merge, split, rename, assign, dissolve
+  {
+    auto r = c.Post("/v1/identities/merge", key, nlohmann::json{{"ids", {id_a, id_b}}}.dump(), "application/json");
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto j = nlohmann::json::parse(r->body);
+    const int64_t target = j["identity"]["identity_id"].get<int64_t>();
+    EXPECT_EQ(j["identity"]["size"], 8);
+    EXPECT_TRUE(j["identity"]["pinned"].get<bool>());
+
+    r = c.Post("/v1/identities/" + std::to_string(target) + "/split", key,
+               nlohmann::json{{"face_ids", {1, 3, 5, 7}}}.dump(), "application/json");
+    ASSERT_EQ(r->status, 200) << r->body;
+    j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["identity"]["size"], 4);
+    EXPECT_EQ(j["new_identity"]["size"], 4);
+    const int64_t nid = j["new_identity"]["identity_id"].get<int64_t>();
+
+    r = c.Patch("/v1/identities/" + std::to_string(nid), key, nlohmann::json{{"name", "person b"}}.dump(),
+                "application/json");
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(nlohmann::json::parse(r->body)["name"], "person b");
+
+    r = c.Delete("/v1/identities/" + std::to_string(nid), key);
+    EXPECT_EQ(r->status, 204);
+    EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(nid), key)->status, 404);
+    EXPECT_EQ(nlohmann::json::parse(c.Get("/v1/faces/1", key)->body)["identity_id"].is_null(), true);
+  }
+  // evaluation and metrics
+  {
+    auto r = c.Get("/v1/eval/impostor?pairs=100", key);
+    ASSERT_EQ(r->status, 200);
+    auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["images_used"], 1);
+    EXPECT_EQ(j["same_image_pairs"], 1);
+    auto m = c.Get("/metrics");
+    EXPECT_NE(m->body.find("hvax_identities "), std::string::npos);
+    EXPECT_NE(m->body.find("hvax_faces_low_quality 1"), std::string::npos);
+    EXPECT_NE(m->body.find("hvax_crop_total 1"), std::string::npos);
+    auto plain = c.Get("/");
+    EXPECT_NE(plain->body.find("identities"), std::string::npos);
+  }
+  std::filesystem::remove_all(dir);
 }

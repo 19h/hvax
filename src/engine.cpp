@@ -12,6 +12,9 @@
 #include "hvax/util/sha256.hpp"
 #include "hvax/util/time.hpp"
 
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
+
 namespace hvax {
 
 namespace {
@@ -41,10 +44,97 @@ Engine::Engine(Config cfg)
 }
 
 Engine::~Engine() {
+  stop_background_cluster();
   try {
     if (gallery_) gallery_->flush();
   } catch (...) {
   }
+}
+
+ClusterParams Engine::cluster_params() const {
+  ClusterParams p;
+  p.neighbors = cfg_.cluster_neighbors;
+  p.edge = cfg_.cluster_edge;
+  p.merge = cfg_.cluster_merge;
+  return p;
+}
+
+std::optional<ClusterReport> Engine::recluster() {
+  auto t0 = std::chrono::steady_clock::now();
+  auto r = gallery_->recluster(cluster_params());
+  if (r) {
+    metrics_.cluster_runs.fetch_add(1, std::memory_order_relaxed);
+    metrics_.cluster_ms_last.store(
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count()),
+        std::memory_order_relaxed);
+  }
+  return r;
+}
+
+ReindexReport Engine::reindex() { return gallery_->reindex(); }
+
+ImpostorReport Engine::impostor_eval(uint64_t max_pairs, uint64_t seed) const {
+  return gallery_->impostor_eval(max_pairs, seed);
+}
+
+void Engine::start_background_cluster() {
+  if (cfg_.cluster_interval_s <= 0 || cluster_thread_.joinable()) return;
+  cluster_thread_ = std::thread([this] {
+    std::unique_lock lock(cluster_cv_mu_);
+    while (!cluster_stop_) {
+      if (cluster_cv_.wait_for(lock, std::chrono::seconds(cfg_.cluster_interval_s), [this] { return cluster_stop_; }))
+        break;
+      lock.unlock();
+      try {
+        recluster();
+      } catch (const std::exception& e) {
+        spdlog::error("background recluster failed: {}", e.what());
+      }
+      lock.lock();
+    }
+  });
+}
+
+void Engine::stop_background_cluster() {
+  {
+    std::lock_guard lock(cluster_cv_mu_);
+    cluster_stop_ = true;
+  }
+  cluster_cv_.notify_all();
+  if (cluster_thread_.joinable()) cluster_thread_.join();
+}
+
+bool Engine::face_crop(int64_t face_id, const CropOptions& opts, std::vector<uint8_t>& jpeg) const {
+  FaceView f;
+  std::filesystem::path path;
+  try {
+    f = gallery_->face(face_id);
+    path = image_file(f.image_id);
+  } catch (...) {
+    return false;
+  }
+  cv::Mat img = cv::imread(path.string(), cv::IMREAD_COLOR);
+  if (img.empty()) return false;
+  const float w = f.box.x2 - f.box.x1, h = f.box.y2 - f.box.y1;
+  const float side = std::max(w, h) * (1.f + 2.f * std::max(opts.pad, 0.f));
+  const float cx = (f.box.x1 + f.box.x2) / 2.f, cy = (f.box.y1 + f.box.y2) / 2.f;
+  // Square crop around the box centre; parts outside the image are padded black.
+  const int x0 = static_cast<int>(std::lround(cx - side / 2.f)), y0 = static_cast<int>(std::lround(cy - side / 2.f));
+  const int s = std::max(1, static_cast<int>(std::lround(side)));
+  cv::Mat canvas(s, s, CV_8UC3, cv::Scalar(0, 0, 0));
+  const cv::Rect src = cv::Rect(x0, y0, s, s) & cv::Rect(0, 0, img.cols, img.rows);
+  if (src.width > 0 && src.height > 0) {
+    img(src).copyTo(canvas(cv::Rect(src.x - x0, src.y - y0, src.width, src.height)));
+  }
+  const int out = std::clamp(opts.size, 16, 1024);
+  cv::Mat resized;
+  cv::resize(canvas, resized, cv::Size(out, out), 0, 0, s > out ? cv::INTER_AREA : cv::INTER_LINEAR);
+  std::vector<uint8_t> buf;
+  if (!cv::imencode(".jpg", resized, buf, {cv::IMWRITE_JPEG_QUALITY, std::clamp(opts.jpeg_quality, 30, 100)}))
+    return false;
+  jpeg.swap(buf);
+  metrics_.crops.fetch_add(1, std::memory_order_relaxed);
+  return true;
 }
 
 bool Engine::confirm_soft(int64_t image_id, const std::vector<DetectedFace>& faces) const {
@@ -276,42 +366,95 @@ IngestCheckResult Engine::check_ingest(const std::array<uint8_t, 32>& sha, uint6
 
 std::vector<DetectedFace> Engine::debug_once(const cv::Mat& bgr) { return run_pipeline(bgr); }
 
-std::vector<Hit> Engine::query_embedding(std::span<const float> vec, int k, float min_score) {
+std::vector<Hit> Engine::query_embedding(std::span<const float> vec, const SearchOptions& opts_in) {
   metrics_.query_emb.fetch_add(1, std::memory_order_relaxed);
   auto t0 = std::chrono::steady_clock::now();
   if (vec.size() != static_cast<size_t>(kDim)) return {};
   Embedding q{};
   std::copy(vec.begin(), vec.end(), q.begin());
   l2_normalize(q.data());
-  if (k <= 0) k = cfg_.default_k;
-  auto hits = gallery_->search(q.data(), k, min_score);
+  SearchOptions opts = opts_in;
+  if (opts.k <= 0) opts.k = cfg_.default_k;
+  auto hits = gallery_->search(q.data(), opts);
   auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
   metrics_.query_us_sum.fetch_add(static_cast<uint64_t>(us), std::memory_order_relaxed);
   return hits;
 }
 
-std::vector<std::vector<Hit>> Engine::query_embedding_batch(std::span<const float> vecs, int nq, int k,
-                                                            float min_score) {
+std::vector<Hit> Engine::query_embedding(std::span<const float> vec, int k, float min_score) {
+  SearchOptions o;
+  o.k = k;
+  o.min_score = min_score;
+  return query_embedding(vec, o);
+}
+
+std::vector<std::vector<Hit>> Engine::query_embedding_batch(std::span<const float> vecs, int nq,
+                                                            const SearchOptions& opts_in) {
   if (nq <= 0) return {};
   std::vector<float> q(static_cast<size_t>(nq * kDim));
   std::memcpy(q.data(), vecs.data(), static_cast<size_t>(nq * kDim) * sizeof(float));
   for (int i = 0; i < nq; ++i) l2_normalize(q.data() + i * kDim);
-  if (k <= 0) k = cfg_.default_k;
+  SearchOptions opts = opts_in;
+  if (opts.k <= 0) opts.k = cfg_.default_k;
   metrics_.query_emb.fetch_add(static_cast<uint64_t>(nq), std::memory_order_relaxed);
-  return gallery_->search_batch(q.data(), nq, k, min_score);
+  return gallery_->search_batch(q.data(), nq, opts);
 }
 
-std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::span<const uint8_t> bytes, int k,
-                                                                           float min_score) {
+std::vector<std::vector<Hit>> Engine::query_embedding_batch(std::span<const float> vecs, int nq, int k,
+                                                            float min_score) {
+  SearchOptions o;
+  o.k = k;
+  o.min_score = min_score;
+  return query_embedding_batch(vecs, nq, o);
+}
+
+std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::span<const uint8_t> bytes,
+                                                                           const SearchOptions& opts_in) {
   metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
   cv::Mat img = decode_image(bytes, cfg_.max_pixels);
   if (img.empty()) return {};
   auto faces = run_pipeline(img);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> out;
   out.reserve(faces.size());
+  SearchOptions opts = opts_in;
+  if (opts.k <= 0) opts.k = cfg_.default_k;
+  for (auto& f : faces) {
+    auto hits = gallery_->search(f.embedding.data(), opts);
+    out.emplace_back(std::move(f), std::move(hits));
+  }
+  return out;
+}
+
+std::vector<std::pair<DetectedFace, std::vector<Hit>>> Engine::query_image(std::span<const uint8_t> bytes, int k,
+                                                                           float min_score) {
+  SearchOptions o;
+  o.k = k;
+  o.min_score = min_score;
+  return query_image(bytes, o);
+}
+
+std::vector<IdentityHit> Engine::query_embedding_identities(std::span<const float> vec, int k, float min_score) {
+  metrics_.query_identity.fetch_add(1, std::memory_order_relaxed);
+  if (vec.size() != static_cast<size_t>(kDim)) return {};
+  Embedding q{};
+  std::copy(vec.begin(), vec.end(), q.begin());
+  l2_normalize(q.data());
+  if (k <= 0) k = cfg_.default_k;
+  return gallery_->search_identities(q.data(), k, min_score);
+}
+
+std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> Engine::query_image_identities(
+    std::span<const uint8_t> bytes, int k, float min_score) {
+  metrics_.query_img.fetch_add(1, std::memory_order_relaxed);
+  metrics_.query_identity.fetch_add(1, std::memory_order_relaxed);
+  cv::Mat img = decode_image(bytes, cfg_.max_pixels);
+  if (img.empty()) return {};
+  auto faces = run_pipeline(img);
+  std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> out;
+  out.reserve(faces.size());
   if (k <= 0) k = cfg_.default_k;
   for (auto& f : faces) {
-    auto hits = gallery_->search(f.embedding.data(), k, min_score);
+    auto hits = gallery_->search_identities(f.embedding.data(), k, min_score);
     out.emplace_back(std::move(f), std::move(hits));
   }
   return out;
@@ -357,8 +500,18 @@ std::string Engine::prometheus() const {
   o << "hvax_query_total{type=\"embedding\"} " << metrics_.query_emb.load() << "\n";
   o << "hvax_query_total{type=\"image\"} " << metrics_.query_img.load() << "\n";
   o << "hvax_query_microseconds_sum " << metrics_.query_us_sum.load() << "\n";
+  o << "hvax_query_total{type=\"identity\"} " << metrics_.query_identity.load() << "\n";
+  o << "hvax_crop_total " << metrics_.crops.load() << "\n";
   o << "hvax_faces " << gallery_->live_faces() << "\n";
+  o << "hvax_faces_indexed " << gallery_->indexed_faces() << "\n";
+  o << "hvax_faces_low_quality " << gallery_->low_quality_faces() << "\n";
+  o << "hvax_faces_unassigned " << gallery_->unassigned_faces() << "\n";
   o << "hvax_images " << gallery_->live_images() << "\n";
+  o << "hvax_identities " << gallery_->identity_count() << "\n";
+  o << "hvax_identity_largest " << gallery_->largest_identity() << "\n";
+  o << "hvax_cluster_runs_total " << metrics_.cluster_runs.load() << "\n";
+  o << "hvax_cluster_last_milliseconds " << metrics_.cluster_ms_last.load() << "\n";
+  o << "hvax_clustering " << (gallery_->clustering() ? 1 : 0) << "\n";
   o << "hvax_hnsw " << (gallery_->hnsw_active() ? 1 : 0) << "\n";
   return o.str();
 }

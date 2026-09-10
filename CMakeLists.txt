@@ -97,6 +97,8 @@ set(HVAX_SOURCES
   src/embed/arcface.cpp
   src/store/phash.cpp
   src/store/gallery.cpp
+  src/store/identity.cpp
+  src/identity/cluster.cpp
   src/index/exact_scan.cpp
   src/index/hnsw_index.cpp
   src/pipeline.cpp
@@ -175,6 +177,7 @@ if(HVAX_BUILD_TESTS)
     tests/test_exact_scan.cpp
     tests/test_scrfd_decode.cpp
     tests/test_gallery.cpp
+    tests/test_identity.cpp
     tests/test_http.cpp
     tests/test_processed.cpp
     tests/test_inference_options.cpp

@@ -15,9 +15,17 @@ Python runtime or database required.
 
 - SCRFD-10G face detection and ArcFace R50 embeddings via ONNX Runtime
 - Raw-image, single-embedding, and batch-embedding search
-- Exact cosine search for galleries below 100,000 embedding rows
+- Identity layer: faces are clustered into people, searches can return people
+  instead of faces, and every stored face carries an identity id
+- Per-face quality gate: tiny or low-confidence faces are stored but kept out
+  of the index and out of clustering
+- Exact cosine search for galleries below 100,000 embedding rows, using an
+  int8 first pass with float32 reranking
 - USearch HNSW candidate search with exact float32 reranking at that threshold
-  and above
+  and above, plus a range mode for heavily repeated people
+- Face crops, co-occurrence ("seen with"), timelines, and hand curation
+  (merge, split, rename) over HTTP
+- Built-in label-free evaluation of the embedding model on the gallery itself
 - Memory-mapped metadata and embedding files instead of SQL
 - SHA-256 and optional perceptual image deduplication
 - Stable image IDs when a duplicate is replaced by a higher-resolution master
@@ -31,8 +39,10 @@ Python runtime or database required.
 
 ```text
 image -> SCRFD detector -> aligned face crops -> ArcFace embeddings -> gallery
-                                                                    |
+                                                                    |    |
 query image/embedding -> normalized 512-float vector -> cosine search + rerank
+                                                                         |
+                        faces ---(kNN graph, label propagation)---> identities
 ```
 
 Each detected face gets one L2-normalized, 512-dimensional float32 embedding.
@@ -391,6 +401,32 @@ For batch search, concatenate `N` raw embeddings and use
 `POST /v1/query/embedding/batch`. hvax infers `N` from the body length, or you
 can set it explicitly with `X-Count`.
 
+### Grouped, range, and people search
+
+Every hit carries `identity_id` (or `null`), `quality`, and `low_quality`.
+Three headers change what a search returns:
+
+```bash
+# one hit per person, best face first, with the number of collapsed hits
+curl --data-binary @probe.jpg -H 'Content-Type: image/jpeg' \
+  -H 'X-Group-By: identity' http://127.0.0.1:8080/v1/query/image
+
+# every face above X-Min-Score, up to --max-range, instead of the top k
+curl --data-binary @probe.jpg -H 'Content-Type: image/jpeg' \
+  -H 'X-Mode: range' -H 'X-Min-Score: 0.6' http://127.0.0.1:8080/v1/query/image
+
+# people ranked by centroid cosine, each with its representative face and the
+# single best matching face
+curl --data-binary @probe.jpg -H 'Content-Type: image/jpeg' \
+  -H 'X-Mode: identity' http://127.0.0.1:8080/v1/query/image
+```
+
+In identity mode the response is `{ "queries": [{ "bbox": ..., "identities":
+[{ "identity_id", "score", "size", "n_images", "rep_face_id", "name",
+"best_face": { ...hit... } }] }] }`. Faces flagged `low_quality` are never
+returned unless `X-Include-Low-Quality: 1` is set, which also forces the exact
+tier because those faces are not in the HNSW.
+
 ## HTTP API
 
 | Method | Path | Description |
@@ -404,8 +440,20 @@ can set it explicitly with `X-Count`.
 | `POST` | `/v1/query/image` | Search every face found in an image |
 | `POST` | `/v1/query/embedding` | Search one raw or JSON embedding |
 | `POST` | `/v1/query/embedding/batch` | Search concatenated raw embeddings |
-| `GET` | `/v1/faces/:id` | Fetch face metadata |
+| `GET` | `/v1/faces/:id` | Fetch face metadata, quality, and identity |
 | `GET` | `/v1/faces/:id?include_embedding=1` | Fetch face metadata and its embedding |
+| `GET` | `/v1/faces/:id/crop?size=160&pad=0.3` | JPEG crop of a face from its master image |
+| `GET` | `/v1/identities?sort=size\|recent\|id&offset&limit` | List people |
+| `GET` | `/v1/identities/:id` | One person with cohesion and top co-occurring people |
+| `GET` | `/v1/identities/:id/faces?sort=score\|time&offset&limit` | Faces of a person with cosine to the centroid |
+| `GET` | `/v1/identities/:id/cooccurring?limit` | People who share photos with this one |
+| `GET` | `/v1/identities/:id/timeline?bucket=hour\|day\|week` | Faces of a person per ingest bucket |
+| `POST` | `/v1/identities/cluster` | Run clustering now; returns the report (409 while running) |
+| `POST` | `/v1/identities/merge` | `{"ids": [..]}` — merge people; the result is pinned |
+| `POST` | `/v1/identities/:id/split` | `{"face_ids": [..]}` — move faces into a new pinned person |
+| `PATCH` | `/v1/identities/:id` | `{"name": "..", "assign_face_ids": [..]}` — rename or assign faces |
+| `DELETE` | `/v1/identities/:id` | Dissolve a person; its faces become unassigned |
+| `GET` | `/v1/eval/impostor?pairs=N` | Label-free impostor evaluation of the embedding model |
 | `GET` | `/v1/images/:sha256/meta` | Fetch image metadata and face IDs |
 | `GET` | `/v1/images/:sha256` | Download the stored master image |
 | `DELETE` | `/v1/images/:sha256` | Delete an image and tombstone its faces |
@@ -424,8 +472,11 @@ Search endpoints accept these optional headers:
 
 | Header | Default | Meaning |
 |---|---:|---|
-| `X-K` | `10` | Maximum hits per query face or embedding |
-| `X-Min-Score` | `0.0` | Minimum cosine-similarity score |
+| `X-K` | `10` | Maximum hits per query face or embedding (groups when grouped) |
+| `X-Min-Score` | `0.35` | Minimum cosine-similarity score (`--min-score`) |
+| `X-Mode` | `faces` | `faces`, `range` (all hits above the floor), or `identity` (people) |
+| `X-Group-By` | — | `identity` collapses hits to the best face per person |
+| `X-Include-Low-Quality` | `0` | Also consider faces below the index gate |
 | `X-Count` | inferred | Number of embeddings in a batch body |
 
 Ingest and image-query bodies may be raw encoded images or multipart uploads.
@@ -493,6 +544,66 @@ network access controls. Face embeddings and source images are sensitive data,
 so use hvax only with the knowledge and permission of the people involved and
 in accordance with applicable law.
 
+## Identities
+
+A gallery of a million faces is really a few thousand people photographed many
+times. hvax turns faces into people in two ways:
+
+- **Batch clustering** (`hvaxd --cluster`, `POST /v1/identities/cluster`, or
+  `--cluster-interval S` in the background) takes the 50 nearest neighbours of
+  every indexable face from the existing HNSW, keeps edges above
+  `--cluster-edge` (0.55), runs Chinese Whispers label propagation, then merges
+  clusters whose centroids are within `--cluster-merge` (0.70). Clusters of one
+  face are left unassigned: an identity is someone seen at least twice.
+  Existing identity ids are kept for the cluster that overlaps them most, so
+  ids are stable across runs. Ingest keeps running while the job holds only
+  short shared locks.
+- **Incremental assignment** at ingest: a new face joins the nearest identity
+  when its cosine to that centroid is at least `--identity-join` (0.55). The
+  ingest response carries `identity_id` per face, so a client knows immediately
+  whether it just saw a known person.
+
+Curation pins identities. A pinned identity's faces are fixed labels during
+clustering, two pinned identities are never merged automatically, and a pinned
+identity is never dissolved by the job. `PATCH` with a name pins as well.
+
+On disk this adds `identities.slots` (128 bytes per person) and
+`centroids.f32` (the unnormalised member mean, row-aligned). The face row's
+formerly reserved field holds `identity_id + 1`; galleries written by earlier
+versions read as "nobody assigned yet" and need no migration.
+
+### Quality gate
+
+Faces smaller than `--index-min-face-px` (24 px) or below `--index-min-det`
+(0.65) are stored with a `low_quality` flag. They are searchable with
+`X-Include-Low-Quality: 1`, but they are not added to the HNSW and never take
+part in clustering: on a large gallery they were the hubs that chained
+unrelated people into one cluster. `quality` in every face and hit is the
+detector score scaled by how far the crop had to be upsampled to reach the
+112 px ArcFace input (16 px → 0, ≥ 112 px → 1). Changing the gate takes effect
+for new faces immediately; run `hvaxd --reindex` to apply it to stored faces
+(it also requantises int8 and rebuilds the HNSW).
+
+### Thresholds
+
+The defaults were measured on a 1.1M-face gallery embedded with `buffalo_l`:
+the impostor distribution has no mass above cosine 0.30, so 0.35 is a safe
+search floor; 0.55 joins faces of one person while keeping strangers apart;
+0.70 between centroids re-joins a person split by pose or ingest batch.
+Re-measure with `hvaxd --eval-impostor` (or `GET /v1/eval/impostor`) after
+changing the model: it samples pairs of non-overlapping faces from the same
+photo — near-certain different people — and random pairs, and reports the
+false-accept rate per threshold, the estimated impostor ceiling, and the
+same-identity excess in random pairs.
+
+### int8 rows
+
+`embeddings.i8` holds `round(f32 × 480)` clamped to ±127 (file version 2).
+Earlier galleries used ×127, which left three quarters of the int8 range unused;
+they are requantised automatically on open. The exact tier scans int8 rows
+first and reranks the candidates against float32, which reads a quarter of the
+bytes for the same top-k. `--no-i8-scan` restores the float32-only scan.
+
 ## Deduplication
 
 The default `--dedup perceptual` mode applies two image hashes:
@@ -536,9 +647,26 @@ risk of false positives.
 --dedup MODE            perceptual, sha256, or off           (default: perceptual)
 --phash-threshold N     pHash Hamming-distance threshold     (default: 10)
 --dhash-threshold N     dHash Hamming-distance threshold     (default: 12)
+--min-score F           default X-Min-Score                  (default: 0.35)
+--index-min-face-px N   faces below N px are low quality     (default: 24)
+--index-min-det F       faces below this det score likewise  (default: 0.65)
+--no-i8-scan            float32-only exact tier              (default: int8 first pass)
+--max-range N           cap for X-Mode: range results        (default: 4096)
+--identity-join F       join nearest identity at this cosine (default: 0.55)
+--cluster-edge F        kNN edge threshold for clustering    (default: 0.55)
+--cluster-merge F       centroid merge threshold             (default: 0.70)
+--cluster-neighbors N   kNN width for clustering             (default: 50)
+--cluster-interval S    recluster in the background every S s (default: off)
+--reindex               recompute flags, requantise, rebuild HNSW; exit
+--cluster               run identity clustering once; exit
+--eval-impostor [N]     impostor evaluation over up to N pairs; exit
 --once IMAGE            process one image and exit
 --help                  show command help
 ```
+
+Maintenance flags can be combined: `hvaxd --data-dir ./data --reindex --cluster
+--eval-impostor` reindexes, clusters, prints all three reports as JSON, and
+exits without opening a port or loading the models.
 
 `--threads` controls CPU execution and CPU fallback nodes. CoreML measurements
 should sweep this value when the selected models contain unsupported operators.
@@ -566,16 +694,23 @@ open a given data directory for writing; `hvax.lock` enforces that constraint.
 | `images.slots` | Packed image records |
 | `faces.slots` | Packed face records; `face_id` equals embedding row |
 | `embeddings.f32` | Aligned, normalized 512-float embeddings |
-| `embeddings.i8` | Quantized companion embeddings |
-| `index.usearch` | Persistent HNSW index |
+| `embeddings.i8` | `round(f32 × 480)` companion rows used by the exact tier's first pass |
+| `identities.slots` | Packed identity records; `identity_id` equals row |
+| `centroids.f32` | Unnormalised member mean per identity, row-aligned with `identities.slots` |
+| `index.usearch` | Persistent HNSW index over faces that pass the quality gate |
 | `hvax.lock` | Single-writer process lock |
 
-Below 100,000 embedding rows, search is an exact float32 inner-product scan.
-At and above 100,000 rows, USearch HNSW produces candidates and hvax reranks
-them using the original float32 embeddings. Deleted rows remain as tombstones,
-so `embedding_rows` can be larger than the live face count.
+Below 100,000 embedding rows, search scans the int8 rows for candidates and
+reranks them against float32. At and above 100,000 rows, USearch HNSW produces
+candidates and hvax reranks them using the original float32 embeddings. Deleted
+rows remain as tombstones, so `embedding_rows` can be larger than the live face
+count; `indexed_faces` in `/v1/stats` is the HNSW size.
 
 ## Chrome extension
+
+The extension shows the gallery's people count next to its face and image
+counts, and after each ingest reports how many faces the server recognised as
+already-known people (`identity_id` in the ingest response).
 
 The optional Manifest V3 extension watches pages for existing and dynamically
 inserted images, then sends them to `/v1/ingest`:

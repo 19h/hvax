@@ -32,6 +32,19 @@ void print_usage() {
       << "  --phash-threshold N     default 10\n"
       << "  --dhash-threshold N     default 12\n"
       << "  --once IMAGE            detect+embed one file to stdout, no HTTP\n"
+      << "  --min-score F           default X-Min-Score, default 0.35\n"
+      << "  --index-min-face-px N   faces smaller than N px stay out of the HNSW, default 24\n"
+      << "  --index-min-det F       faces below this detector score stay out of the HNSW, default 0.65\n"
+      << "  --no-i8-scan            exact tier reads f32 rows instead of int8 candidates\n"
+      << "  --max-range N           cap for X-Mode: range results, default 4096\n"
+      << "  --identity-join F       face joins the nearest identity at this cosine, default 0.55\n"
+      << "  --cluster-edge F        kNN edge threshold for clustering, default 0.55\n"
+      << "  --cluster-merge F       centroid merge threshold, default 0.70\n"
+      << "  --cluster-neighbors N   kNN width for clustering, default 50\n"
+      << "  --cluster-interval S    recluster in the background every S seconds, default off\n"
+      << "  --reindex               recompute quality flags, requantize int8, rebuild HNSW; exit\n"
+      << "  --cluster               run identity clustering once; exit\n"
+      << "  --eval-impostor [N]     print impostor-pair evaluation over up to N pairs; exit\n"
       << "  --help\n";
 }
 
@@ -85,6 +98,22 @@ Config parse_args(int argc, char** argv) {
     else if (eq(argv[i], "--phash-threshold")) c.phash_threshold = std::stoi(need("--phash-threshold"));
     else if (eq(argv[i], "--dhash-threshold")) c.dhash_threshold = std::stoi(need("--dhash-threshold"));
     else if (eq(argv[i], "--once")) c.once_image = need("--once");
+    else if (eq(argv[i], "--min-score")) c.default_min_score = std::stof(need("--min-score"));
+    else if (eq(argv[i], "--index-min-face-px")) c.index_min_face_px = std::stoi(need("--index-min-face-px"));
+    else if (eq(argv[i], "--index-min-det")) c.index_min_det = std::stof(need("--index-min-det"));
+    else if (eq(argv[i], "--no-i8-scan")) c.i8_scan = false;
+    else if (eq(argv[i], "--max-range")) c.max_range = std::stoi(need("--max-range"));
+    else if (eq(argv[i], "--identity-join")) c.identity_join = std::stof(need("--identity-join"));
+    else if (eq(argv[i], "--cluster-edge")) c.cluster_edge = std::stof(need("--cluster-edge"));
+    else if (eq(argv[i], "--cluster-merge")) c.cluster_merge = std::stof(need("--cluster-merge"));
+    else if (eq(argv[i], "--cluster-neighbors")) c.cluster_neighbors = std::stoi(need("--cluster-neighbors"));
+    else if (eq(argv[i], "--cluster-interval")) c.cluster_interval_s = std::stoi(need("--cluster-interval"));
+    else if (eq(argv[i], "--reindex")) c.reindex = true;
+    else if (eq(argv[i], "--cluster")) c.cluster_once = true;
+    else if (eq(argv[i], "--eval-impostor")) {
+      c.eval_impostor_pairs = 200000;
+      if (i + 1 < argc && argv[i + 1][0] != '-') c.eval_impostor_pairs = std::stoi(argv[++i]);
+    }
     else if (eq(argv[i], "--compact")) c.compact = true;
     else if (eq(argv[i], "--dedup")) {
       std::string v = need("--dedup");
@@ -100,6 +129,13 @@ Config parse_args(int argc, char** argv) {
   if (c.det_size <= 0 || c.det_size % 32 != 0)
     throw std::runtime_error("--det-size must be a positive multiple of 32");
   if (c.inference.device_id < 0) throw std::runtime_error("CUDA device must be non-negative");
+  if (c.index_min_face_px < 0) throw std::runtime_error("--index-min-face-px must be non-negative");
+  if (c.index_min_det < 0.f || c.index_min_det > 1.f) throw std::runtime_error("--index-min-det must be in [0,1]");
+  if (c.max_range < 1) throw std::runtime_error("--max-range must be positive");
+  if (c.cluster_neighbors < 2) throw std::runtime_error("--cluster-neighbors must be at least 2");
+  if (c.cluster_interval_s < 0) throw std::runtime_error("--cluster-interval must be non-negative");
+  for (float t : {c.identity_join, c.cluster_edge, c.cluster_merge})
+    if (t < -1.f || t > 1.f) throw std::runtime_error("cosine thresholds must be in [-1,1]");
   if (c.inference.provider == InferenceProvider::coreml && c.inference.coreml_cache_dir.empty())
     c.inference.coreml_cache_dir = c.data_dir + "/coreml-cache";
   if (c.inference.provider == InferenceProvider::coreml)

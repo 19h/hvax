@@ -154,7 +154,7 @@
   }
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     border-top: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
     padding: 0.7rem 0;
@@ -350,9 +350,96 @@
   footer a { color: var(--cyan); text-decoration: none; }
   footer a:hover { text-decoration: underline; }
   .err { color: var(--warn); }
+  .hit .more { color: var(--hot); }
+  .hit .id { color: var(--cyan); cursor: pointer; }
+  .hit .id:hover { text-decoration: underline; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+    gap: 0.4rem;
+  }
+  .pc {
+    position: relative;
+    cursor: pointer;
+    border: 1px solid transparent;
+    background: #000;
+    line-height: 0;
+    text-decoration: none;
+  }
+  .pc:hover, .pc:focus-visible { border-color: var(--cyan); outline: none; }
+  .pc img {
+    width: 100%;
+    aspect-ratio: 1;
+    object-fit: cover;
+    display: block;
+    background: #000;
+  }
+  .pc b {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    font-size: 10px;
+    line-height: 1.3;
+    font-weight: 400;
+    color: var(--bright);
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    padding: 0 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .pc.on { border-color: var(--hot); }
+  .phead {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.8rem;
+    color: var(--mute);
+    font-size: 12px;
+  }
+  .phead button {
+    background: none;
+    border: 0;
+    color: var(--cyan);
+    font: inherit;
+    cursor: pointer;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .phead button:hover { color: var(--bright); }
+  .phead button.on { color: var(--hot); }
+  #person {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    padding: 0.7rem 0.8rem 0.85rem;
+    display: grid;
+    gap: 0.55rem;
+    margin-top: 0.6rem;
+  }
+  #person[hidden] { display: none; }
+  #person h3 {
+    font-size: 11px;
+    font-weight: 400;
+    color: var(--hot);
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  #person .name {
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    color: var(--bright);
+    font: inherit;
+    width: 12rem;
+    padding: 0.1rem 0.2rem;
+    outline: none;
+  }
+  #person .name:focus { border-color: var(--cyan); }
+  .empty { color: var(--mute); font-size: 12px; }
+  .empty[hidden] { display: none; }
   @media (max-width: 560px) {
     main { width: calc(100% - 1.2rem); padding-top: 1.1rem; gap: 0.95rem; }
-    .stats { grid-template-columns: 1fr 1fr; }
+    .stats { grid-template-columns: 1fr 1fr 1fr; }
+    .grid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); }
     .eps { grid-template-columns: 1fr; }
     .preview { grid-template-columns: 1fr; }
     .preview > img, .preview > canvas { max-height: 180px; }
@@ -387,6 +474,7 @@
       <div><b id="n-images">—</b><span>images</span></div>
       <div><b id="n-faces">—</b><span>faces</span></div>
       <div><b id="n-embs">—</b><span>embeds</span></div>
+      <div><b id="n-ident">—</b><span>people</span></div>
       <div><b id="n-index">—</b><span>index</span></div>
     </div>
   </section>
@@ -400,6 +488,10 @@
         <button type="button" id="m-q">search</button>
       </div>
       <span id="searchopts" hidden>
+        <span class="seg" id="qmode">
+          <button type="button" id="q-people" class="on">people</button>
+          <button type="button" id="q-faces">faces</button>
+        </span>
         <label class="num">k <input id="k" value="10" inputmode="numeric"></label>
         <label class="num">min <input id="min" value="0.35" inputmode="decimal"></label>
       </span>
@@ -408,6 +500,16 @@
   </section>
 
   <section id="out"></section>
+
+  <section id="peoplesec">
+    <div class="phead">
+      <h2>people</h2>
+      <span><button type="button" id="p-size" class="on">by size</button> · <button type="button" id="p-recent">recent</button> · <button type="button" id="p-more">more</button></span>
+    </div>
+    <div class="grid" id="pgrid"></div>
+    <p class="empty" id="pempty" hidden>no identities yet — run <code>hvaxd --cluster</code> or POST /v1/identities/cluster</p>
+    <div id="person" hidden></div>
+  </section>
 
   <section>
     <h2>endpoints</h2>
@@ -422,6 +524,12 @@
       <button class="p" type="button" data-path="/v1/query/embedding"><em>POST</em><code>/v1/query/embedding</code></button>
       <button type="button" data-path="/v1/images/:sha256"><em>GET</em><code>/v1/images/:sha256</code></button>
       <button type="button" data-path="/v1/faces/:id"><em>GET</em><code>/v1/faces/:id</code></button>
+      <button type="button" data-path="/v1/faces/:id/crop"><em>GET</em><code>/v1/faces/:id/crop</code></button>
+      <a href="/v1/identities"><em>GET</em><code>/v1/identities</code></a>
+      <button type="button" data-path="/v1/identities/:id"><em>GET</em><code>/v1/identities/:id</code></button>
+      <button type="button" data-path="/v1/identities/:id/faces"><em>GET</em><code>/v1/identities/:id/faces</code></button>
+      <button type="button" data-path="/v1/identities/:id/cooccurring"><em>GET</em><code>/v1/identities/:id/cooccurring</code></button>
+      <button type="button" class="p" data-path="/v1/identities/cluster"><em>POST</em><code>/v1/identities/cluster</code></button>
     </div>
   </section>
 
@@ -445,6 +553,9 @@
   const keyEl = $("key"), keyRow = $("keyrow"), copyBtn = $("copy");
   const thumbs = new Map();
   let mode = "ingest";
+  let qmode = "people";
+  let psort = "size";
+  let plimit = 24;
 
   hostEl.textContent = location.host || "local";
   try { keyEl.value = sessionStorage.getItem("hvax-key") || ""; } catch (e) {}
@@ -475,6 +586,7 @@
     if (mode === "query") {
       s += " \\\n     -H 'X-K: " + ($("k").value || "10") + "'";
       s += " \\\n     -H 'X-Min-Score: " + ($("min").value || "0.35") + "'";
+      s += qmode === "people" ? " \\\n     -H 'X-Mode: identity'" : " \\\n     -H 'X-Group-By: identity'";
     }
     s += " \\\n     " + origin + path;
     return s;
@@ -486,8 +598,14 @@
     $("m-in").classList.toggle("on", m === "ingest");
     $("m-q").classList.toggle("on", m === "query");
     $("searchopts").hidden = m !== "query";
-    $("hinttext").textContent = m === "ingest" ? "drop a face" : "search by face";
+    $("hinttext").textContent = m === "ingest" ? "drop a face" : (qmode === "people" ? "find this person" : "search by face");
     paintCurl();
+  }
+  function setQMode(m) {
+    qmode = m;
+    $("q-people").classList.toggle("on", m === "people");
+    $("q-faces").classList.toggle("on", m === "faces");
+    setMode(mode);
   }
 
   async function refresh() {
@@ -514,7 +632,128 @@
     $("n-images").textContent = fmt(j.images);
     $("n-faces").textContent = fmt(j.faces);
     $("n-embs").textContent = fmt(j.embedding_rows !== undefined ? j.embedding_rows : j.faces);
+    $("n-ident").textContent = fmt(j.identities);
     $("n-index").textContent = j.hnsw ? "hnsw" : "exact";
+  }
+
+  // Face crops carry the API key header, so fetch them into blob URLs.
+  async function crop(faceId, size) {
+    const key = faceId + "@" + size;
+    if (thumbs.has(key)) return thumbs.get(key);
+    try {
+      const r = await fetch("/v1/faces/" + faceId + "/crop?size=" + size, { headers: keyHdr() });
+      if (!r.ok) return "";
+      const u = URL.createObjectURL(await r.blob());
+      thumbs.set(key, u);
+      return u;
+    } catch (e) { return ""; }
+  }
+  function fillCrops(root) {
+    for (const img of root.querySelectorAll("img[data-face]")) {
+      crop(img.getAttribute("data-face"), img.getAttribute("data-size") || "96").then((u) => { if (u) img.src = u; });
+    }
+  }
+  function when(ms) {
+    if (!ms) return "—";
+    const d = new Date(Number(ms));
+    return isNaN(d) ? "—" : d.toISOString().slice(0, 10);
+  }
+  function label(p) {
+    return p.name ? esc(p.name) : "#" + esc(p.identity_id);
+  }
+  function bindOpen(root, sel) {
+    for (const el of root.querySelectorAll(sel)) {
+      const open = (e) => { e.preventDefault(); openPerson(Number(el.getAttribute("data-id"))); };
+      el.addEventListener("click", open);
+      el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") open(e); });
+    }
+  }
+
+  async function api(path) {
+    if (location.protocol === "file:") return null;
+    try {
+      const r = await fetch(path, { headers: keyHdr(), cache: "no-store" });
+      if (r.status === 401) { keyRow.classList.add("show", "need"); return null; }
+      if (!r.ok) return null;
+      return await r.json();
+    } catch (e) { return null; }
+  }
+
+  async function loadPeople() {
+    const j = await api("/v1/identities?sort=" + psort + "&limit=" + plimit);
+    const grid = $("pgrid");
+    if (!j) { grid.innerHTML = ""; return; }
+    const list = j.identities || [];
+    $("pempty").hidden = list.length > 0;
+    let html = "";
+    for (const p of list) {
+      html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(p.identity_id) + "' title='" + label(p) + " · " + esc(p.size) + " faces'>"
+        + "<img alt='' data-face='" + esc(p.rep_face_id) + "' data-size='96'><b>" + esc(p.size) + "</b></div>";
+    }
+    grid.innerHTML = html;
+    fillCrops(grid);
+    bindOpen(grid, ".pc");
+  }
+
+  async function openPerson(id) {
+    const box = $("person");
+    box.hidden = false;
+    box.innerHTML = "<div class='phead'><span>loading #" + esc(id) + "…</span></div>";
+    box.scrollIntoView({ block: "nearest" });
+    const [p, faces, co] = await Promise.all([
+      api("/v1/identities/" + id),
+      api("/v1/identities/" + id + "/faces?limit=24"),
+      api("/v1/identities/" + id + "/cooccurring?limit=12"),
+    ]);
+    if (!p) { box.innerHTML = "<div class='phead err'><span>identity " + esc(id) + " not found</span></div>"; return; }
+    for (const el of $("pgrid").querySelectorAll(".pc")) el.classList.toggle("on", Number(el.getAttribute("data-id")) === id);
+    let html = "<div class='phead'><span><input class='name' id='pname' placeholder='#" + esc(id) + "' value='" + esc(p.name || "") + "' aria-label='name'>"
+      + (p.pinned ? " · pinned" : "") + "</span><span><button type='button' id='p-find'>find similar</button> · <button type='button' id='p-close'>close</button></span></div>";
+    html += "<div class='kv'>"
+      + row("identity", "#" + esc(p.identity_id))
+      + row("faces", esc(p.size) + " in " + esc(p.n_images) + " image" + (p.n_images === 1 ? "" : "s"))
+      + row("cohesion", Number(p.cohesion).toFixed(3))
+      + row("seen", when(p.first_seen) + " → " + when(p.last_seen))
+      + "</div>";
+    html += "<h3>faces</h3><div class='grid' id='pfaces'>";
+    for (const f of (faces && faces.faces) || []) {
+      html += "<a class='pc' href='/v1/faces/" + esc(f.face_id) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
+        + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'><b>" + Number(f.score).toFixed(2) + "</b></a>";
+    }
+    html += "</div>";
+    const cos = (co && co.cooccurring) || [];
+    if (cos.length) {
+      html += "<h3>seen with</h3><div class='grid' id='pco'>";
+      for (const c of cos) {
+        html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(c.identity_id) + "' title='" + (c.name ? esc(c.name) : "#" + esc(c.identity_id)) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + "'>"
+          + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
+      }
+      html += "</div>";
+    }
+    box.innerHTML = html;
+    fillCrops(box);
+    bindOpen(box, "#pco .pc");
+    $("p-close").addEventListener("click", () => { box.hidden = true; box.innerHTML = ""; });
+    $("p-find").addEventListener("click", async () => {
+      // search by the identity's representative face embedding
+      const f = await api("/v1/faces/" + p.rep_face_id + "?include_embedding=1");
+      if (!f || !f.embedding) return;
+      setMode("query");
+      const t0 = performance.now();
+      const headers = Object.assign({ "Content-Type": "application/json", "X-K": $("k").value || "10", "X-Min-Score": $("min").value || "0.35" }, keyHdr());
+      headers[qmode === "people" ? "X-Mode" : "X-Group-By"] = "identity";
+      const r = await fetch("/v1/query/embedding", { method: "POST", headers, body: JSON.stringify({ embedding: f.embedding }) });
+      const body = r.ok ? await r.json() : {};
+      // normalise to the /v1/query/image shape so render() can draw it
+      const q = qmode === "people" ? { identities: body.identities || [] } : { hits: body.hits || [] };
+      await render({ name: "identity #" + id }, r.status, { queries: [q] }, Math.round(performance.now() - t0), true);
+      out.scrollIntoView({ block: "nearest" });
+    });
+    $("pname").addEventListener("change", async () => {
+      const name = $("pname").value.trim();
+      await fetch("/v1/identities/" + id, { method: "PATCH", headers: Object.assign({ "Content-Type": "application/json" }, keyHdr()), body: JSON.stringify({ name }) });
+      loadPeople();
+    });
   }
 
   function loadImg(file) {
@@ -551,17 +790,6 @@
     return c.toDataURL("image/jpeg", 0.86);
   }
 
-  async function thumb(sha256) {
-    if (thumbs.has(sha256)) return thumbs.get(sha256);
-    try {
-      const r = await fetch("/v1/images/" + sha256, { headers: keyHdr() });
-      if (!r.ok) return "";
-      const u = URL.createObjectURL(await r.blob());
-      thumbs.set(sha256, u);
-      return u;
-    } catch (e) { return ""; }
-  }
-
   function esc(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -572,7 +800,7 @@
     return "<div><span class='k'>" + esc(k) + "</span><span class='v'>" + v + "</span></div>";
   }
 
-  async function render(file, status, body, ms) {
+  async function render(file, status, body, ms, noimage) {
     out.className = "show";
     if (status === 204) {
       out.innerHTML = "<div class='out-h'><strong>no face</strong><span>" + esc(file.name) + " · " + ms + " ms</span></div>";
@@ -594,11 +822,13 @@
     }
 
     let imgSrc = "";
-    try {
-      const img = await loadImg(file);
-      const faces = mode === "ingest" ? (body.faces || []) : (body.queries || []);
-      imgSrc = drawFaces(img, faces);
-    } catch (e) {}
+    if (!noimage) {
+      try {
+        const img = await loadImg(file);
+        const faces = mode === "ingest" ? (body.faces || []) : (body.queries || []);
+        imgSrc = drawFaces(img, faces);
+      } catch (e) {}
+    }
 
     if (mode === "ingest") {
       const faces = body.faces || [];
@@ -609,9 +839,19 @@
       kv += row("duplicate", body.duplicate ? esc(body.duplicate_kind || "yes") : "no");
       kv += row("replaced", body.master_replaced ? "yes" : "no");
       if (faces[0]) kv += row("det", Number(faces[0].det_score).toFixed(3));
+      const known = faces.filter((f) => f.identity_id !== null && f.identity_id !== undefined);
+      if (faces.length) {
+        kv += row("known", known.length
+          ? known.map((f) => "<span class='id' data-id='" + esc(f.identity_id) + "'>#" + esc(f.identity_id) + "</span>").join(" ")
+          : "no");
+      }
+      const lowq = faces.filter((f) => f.low_quality).length;
+      if (lowq) kv += row("low quality", esc(lowq) + " not indexed");
       kv += "</div>";
       out.innerHTML = "<div class='out-h'><strong>stored</strong><span>" + ms + " ms</span></div>"
         + "<div class='preview'><img alt='' src='" + imgSrc + "'>" + kv + "</div>";
+      bindOpen(out, ".id");
+      loadPeople();
       return;
     }
 
@@ -621,24 +861,41 @@
     html += "<div class='preview'><img alt='' src='" + imgSrc + "'><div class='hits'>";
     for (let qi = 0; qi < queries.length; qi++) {
       const q = queries[qi];
+      const det = q.det_score !== undefined ? " · det " + Number(q.det_score || 0).toFixed(3) : "";
+      if (q.identities) {
+        const ids = q.identities;
+        html += "<div class='q'><div class='out-h'><span>q" + qi + det + "</span><span>" + ids.length + " people</span></div>";
+        for (const p of ids) {
+          const pct = Math.max(0, Math.min(100, Number(p.score) * 100));
+          const bf = p.best_face;
+          html += "<div class='hit'><a href='#' class='id' data-id='" + esc(p.identity_id) + "'><img alt='' data-face='" + esc(bf ? bf.face_id : p.rep_face_id) + "' data-size='96'></a><div>"
+            + "<span class='v'>" + Number(p.score).toFixed(3) + "</span>  <span class='id' data-id='" + esc(p.identity_id) + "'>" + label(p) + "</span>"
+            + "  " + esc(p.size) + " face" + (p.size === 1 ? "" : "s") + " · " + esc(p.n_images) + " img"
+            + (bf ? "  <span class='k'>best face " + esc(bf.face_id) + " " + Number(bf.score).toFixed(3) + "</span>" : "")
+            + "<div class='bar'><i style='width:" + pct + "%'></i></div></div></div>";
+        }
+        html += "</div>";
+        continue;
+      }
       const hits = q.hits || [];
-      html += "<div class='q'><div class='out-h'><span>q" + qi + " · det " + Number(q.det_score || 0).toFixed(3) + "</span><span>" + hits.length + " hits</span></div>";
+      html += "<div class='q'><div class='out-h'><span>q" + qi + det + "</span><span>" + hits.length + " hits</span></div>";
       for (const h of hits) {
         const pct = Math.max(0, Math.min(100, Number(h.score) * 100));
-        html += "<div class='hit' data-img='" + esc(h.sha256) + "'><a href='/v1/images/" + esc(h.sha256) + "' target='_blank' rel='noopener'><img alt=''></a><div>"
+        const who = h.identity_id !== null && h.identity_id !== undefined
+          ? "  <span class='id' data-id='" + esc(h.identity_id) + "'>#" + esc(h.identity_id) + "</span>" : "";
+        const more = h.collapsed ? "  <span class='more'>+" + esc(h.collapsed) + " more</span>" : "";
+        html += "<div class='hit'><a href='/v1/images/" + esc(h.sha256) + "' target='_blank' rel='noopener'><img alt='' data-face='" + esc(h.face_id) + "' data-size='96'></a><div>"
           + "<span class='v'>" + Number(h.score).toFixed(3) + "</span>  img " + esc(h.image_id)
-          + "  face " + esc(h.face_id)
+          + "  face " + esc(h.face_id) + who + more
+          + (h.low_quality ? "  <span class='k'>low quality</span>" : "")
           + "<div class='bar'><i style='width:" + pct + "%'></i></div></div></div>";
       }
       html += "</div>";
     }
     html += "</div></div>";
     out.innerHTML = html;
-    for (const el of out.querySelectorAll(".hit")) {
-      const id = el.getAttribute("data-img");
-      const img = el.querySelector("img");
-      thumb(id).then((u) => { if (u) img.src = u; });
-    }
+    fillCrops(out);
+    bindOpen(out, ".id");
   }
 
   async function send(file) {
@@ -651,6 +908,7 @@
     if (mode === "query") {
       headers["X-K"] = $("k").value || "10";
       headers["X-Min-Score"] = $("min").value || "0.35";
+      headers[qmode === "people" ? "X-Mode" : "X-Group-By"] = "identity";
     }
     const t0 = performance.now();
     let status = 0, body = "";
@@ -676,6 +934,11 @@
 
   $("m-in").addEventListener("click", (e) => { e.stopPropagation(); setMode("ingest"); });
   $("m-q").addEventListener("click", (e) => { e.stopPropagation(); setMode("query"); });
+  $("q-people").addEventListener("click", (e) => { e.stopPropagation(); setQMode("people"); });
+  $("q-faces").addEventListener("click", (e) => { e.stopPropagation(); setQMode("faces"); });
+  $("p-size").addEventListener("click", () => { psort = "size"; plimit = 24; $("p-size").classList.add("on"); $("p-recent").classList.remove("on"); loadPeople(); });
+  $("p-recent").addEventListener("click", () => { psort = "recent"; plimit = 24; $("p-recent").classList.add("on"); $("p-size").classList.remove("on"); loadPeople(); });
+  $("p-more").addEventListener("click", () => { plimit = Math.min(500, plimit + 48); loadPeople(); });
   $("keytoggle").addEventListener("click", () => {
     keyRow.classList.toggle("show");
     if (keyRow.classList.contains("show")) keyEl.focus();
@@ -701,6 +964,7 @@
     try { sessionStorage.setItem("hvax-key", keyEl.value); } catch (e) {}
     paintCurl();
     refresh();
+    loadPeople();
   });
   $("k").addEventListener("input", paintCurl);
   $("min").addEventListener("input", paintCurl);
@@ -741,6 +1005,7 @@
   setMode("ingest");
   paintCurl();
   refresh();
+  loadPeople();
   setInterval(refresh, 4000);
 })();
 </script>

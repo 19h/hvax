@@ -24,12 +24,35 @@ struct Config {
   int dhash_threshold = 12;
   uint64_t exact_until = 100000;
   int default_k = 10;
-  float default_min_score = 0.0f;
+  float default_min_score = kDefaultMinScore;
   size_t max_upload = 20 * 1024 * 1024;
   int64_t max_pixels = 40000000;
   std::string once_image;
   bool compact = false;
   bool print_help = false;
+
+  // Index gate: faces below either bound are stored with kLowQuality and left
+  // out of the HNSW and of identity clustering.
+  int index_min_face_px = kDefaultIndexMinFacePx;
+  float index_min_det = kDefaultIndexMinDet;
+  // Use the int8 matrix as the first pass of the exact tier, then rerank
+  // candidates against f32 rows.
+  bool i8_scan = true;
+  // Range mode and saturated queries may grow the HNSW candidate pool up to
+  // this many rows.
+  int max_range = 4096;
+
+  // Identity layer.
+  float identity_join = kIdentityJoinCosine;
+  float cluster_edge = kClusterEdgeCosine;
+  float cluster_merge = kIdentityMergeCosine;
+  int cluster_neighbors = kClusterNeighbors;
+  int cluster_interval_s = 0;  // 0 = no background reclustering
+
+  // One-shot maintenance modes; the daemon exits after running them.
+  bool reindex = false;
+  bool cluster_once = false;
+  int eval_impostor_pairs = 0;  // >0: print the impostor evaluation as JSON and exit
 };
 
 Config parse_args(int argc, char** argv);

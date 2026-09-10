@@ -1,6 +1,13 @@
 import { resolveApiUrl } from "./api";
 import { bumpStats, loadSettings, loadStats, saveStats } from "./settings";
-import { EMPTY_STATS, type ExtMessage, type ServerStats, type Settings, type StatusResponse } from "./types";
+import {
+  EMPTY_STATS,
+  type ExtMessage,
+  type IngestResponse,
+  type ServerStats,
+  type Settings,
+  type StatusResponse,
+} from "./types";
 
 const inFlight = new Set<string>();
 const posted = new Set<string>();
@@ -105,12 +112,26 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
   } else if (res.status === 200) {
     let kind = "stored";
     try {
-      const j = (await res.json()) as { duplicate?: boolean; duplicate_kind?: string; master_replaced?: boolean };
+      const j = (await res.json()) as IngestResponse;
+      const faces = j.faces ?? [];
+      // Faces the gallery already recognised: identity_id is set by the
+      // identity layer at ingest when a stored person matches.
+      const known = faces.filter((f) => f.identity_id !== null && f.identity_id !== undefined);
+      const detail = faces.length
+        ? ` · ${faces.length} face${faces.length === 1 ? "" : "s"}` +
+          (known.length ? ` · ${known.length} known (#${known.map((f) => f.identity_id).join(", #")})` : "")
+        : "";
       if (j.duplicate) {
         kind = j.master_replaced ? "upgraded" : j.duplicate_kind ?? "duplicate";
-        await bumpStats({ duplicates: 1, lastStatus: kind, lastError: "" });
+        await bumpStats({ duplicates: 1, lastStatus: kind + detail, lastError: "" });
       } else {
-        await bumpStats({ stored: 1, lastStatus: "stored", lastError: "" });
+        await bumpStats({
+          stored: 1,
+          faces: faces.length,
+          known: known.length,
+          lastStatus: "stored" + detail,
+          lastError: "",
+        });
       }
     } catch {
       await bumpStats({ stored: 1, lastStatus: "stored", lastError: "" });

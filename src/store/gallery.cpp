@@ -8,8 +8,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
-#include <fstream>
+#include <unordered_map>
 
 #include <spdlog/spdlog.h>
 
@@ -50,7 +51,12 @@ FaceSlot make_face_slot(uint64_t face_id, uint64_t image_id, const DetectedFace&
   }
   s.flags = 0;
   s.created_at = static_cast<uint64_t>(now);
+  s.identity_ref = 0;
   return s;
+}
+
+double ms_since(std::chrono::steady_clock::time_point t0) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 }  // namespace
@@ -60,22 +66,30 @@ Gallery::Gallery(const Config& cfg) : cfg_(cfg), data_dir_(cfg.data_dir) {
   images_.open(data_dir_ / "images.slots", "HVAXIMG1");
   faces_.open(data_dir_ / "faces.slots", "HVAXFCE1");
   embs_.open(data_dir_ / "embeddings.f32", "HVAXEMB1");
-  embs_i8_.open(data_dir_ / "embeddings.i8", "HVAXEI81");
+  embs_i8_.open(data_dir_ / "embeddings.i8", "HVAXEI81", kI8FileVersion);
+  identities_.open(data_dir_ / "identities.slots", "HVAXIDN1");
+  centroids_.open(data_dir_ / "centroids.f32", "HVAXCEN1");
   hnsw_.open(data_dir_ / "index.usearch");
 
   if (embs_.size() != faces_.size()) {
     spdlog::warn("embedding rows {} != face slots {}; truncating to min", embs_.size(), faces_.size());
   }
+  if (identities_.size() != centroids_.size()) {
+    spdlog::warn("identity rows {} != centroid rows {}; identities will be recomputed", identities_.size(),
+                 centroids_.size());
+  }
+  ensure_i8_version();
   rebuild_maps();
+  load_identity_state_locked();
 
   const uint64_t n = std::min(embs_.size(), faces_.size());
-  if (hnsw_.size() == 0 && n > 0) {
-    std::vector<uint32_t> flags(static_cast<size_t>(n));
-    for (uint64_t i = 0; i < n; ++i) flags[static_cast<size_t>(i)] = faces_.at(i).flags;
-    hnsw_.rebuild_from(embs_.at(0).v, n, flags.data());
+  // --reindex rebuilds the index itself right after construction.
+  if (hnsw_.size() == 0 && n > 0 && !cfg_.reindex) {
+    hnsw_.rebuild_from(embs_.at(0).v, n, flags_cache_.data());
     hnsw_.save();
   }
-  spdlog::info("gallery images={} faces={} emb_rows={}", images_.size(), faces_.size(), embs_.size());
+  spdlog::info("gallery images={} faces={} emb_rows={} indexed={} identities={} i8_kernel={}", images_.size(),
+               faces_.size(), embs_.size(), hnsw_.size(), identity_count(), i8_kernel_name());
 }
 
 Gallery::~Gallery() {
@@ -85,10 +99,23 @@ Gallery::~Gallery() {
   }
 }
 
+void Gallery::ensure_i8_version() {
+  const uint64_t n = std::min(embs_.size(), faces_.size());
+  const bool stale = embs_i8_.version() != kI8FileVersion || embs_i8_.size() < n;
+  if (!stale) return;
+  spdlog::info("requantizing {} int8 rows (file version {} -> {}, scale {})", n, embs_i8_.version(),
+               kI8FileVersion, kI8Scale);
+  while (embs_i8_.size() < n) embs_i8_.append(EmbI8{});
+  for (uint64_t i = 0; i < n; ++i) quantize_i8(embs_.at(i).v, embs_i8_.at(i).v);
+  embs_i8_.set_version(kI8FileVersion);
+  embs_i8_.fsync_all();
+}
+
 void Gallery::rebuild_maps() {
   sha_to_idx_.clear();
   sha_to_idx_.reserve(static_cast<size_t>(images_.size()));
   flags_cache_.assign(static_cast<size_t>(faces_.size()), kTombstone);
+  image_faces_.assign(static_cast<size_t>(images_.size()), {});
   for (uint64_t i = 0; i < images_.size(); ++i) {
     const auto& im = images_.at(i);
     if (!slot_live(im.flags)) continue;
@@ -97,8 +124,15 @@ void Gallery::rebuild_maps() {
     sha_to_idx_[k] = i;
   }
   for (uint64_t i = 0; i < faces_.size(); ++i) {
-    flags_cache_[static_cast<size_t>(i)] = faces_.at(i).flags;
+    const auto& f = faces_.at(i);
+    flags_cache_[static_cast<size_t>(i)] = f.flags;
+    if (slot_live(f.flags)) track_image_face_locked(f.image_id, i);
   }
+}
+
+void Gallery::track_image_face_locked(uint64_t image_id, uint64_t row) {
+  if (image_id == 0 || image_id > image_faces_.size()) return;
+  image_faces_[static_cast<size_t>(image_id - 1)].push_back(static_cast<uint32_t>(row));
 }
 
 std::filesystem::path Gallery::image_path(const std::array<uint8_t, 32>& sha) const {
@@ -179,20 +213,27 @@ ImageView Gallery::image(int64_t image_id) const {
   const auto& s = images_.at(static_cast<uint64_t>(image_id - 1));
   if (!slot_live(s.flags) || static_cast<int64_t>(s.image_id) != image_id) throw std::runtime_error("no image");
   auto v = image_from_slot(s);
-  v.face_ids.reserve(s.nfaces);
-  for (uint64_t i = 0; i < faces_.size(); ++i) {
-    const auto& f = faces_.at(i);
-    if (slot_live(f.flags) && static_cast<int64_t>(f.image_id) == image_id) v.face_ids.push_back(static_cast<int64_t>(f.face_id));
-  }
+  const auto& rows = image_faces_[static_cast<size_t>(image_id - 1)];
+  v.face_ids.reserve(rows.size());
+  for (uint32_t r : rows) v.face_ids.push_back(static_cast<int64_t>(faces_.at(r).face_id));
   return v;
 }
 
 std::vector<FaceView> Gallery::faces_of(int64_t image_id) const {
   std::shared_lock lock(mu_);
   std::vector<FaceView> out;
-  for (uint64_t i = 0; i < faces_.size(); ++i) {
-    const auto& f = faces_.at(i);
-    if (slot_live(f.flags) && static_cast<int64_t>(f.image_id) == image_id) out.push_back(face_from_slot(f));
+  if (image_id <= 0 || static_cast<uint64_t>(image_id) > image_faces_.size()) return out;
+  for (uint32_t r : image_faces_[static_cast<size_t>(image_id - 1)]) out.push_back(face_from_slot(faces_.at(r)));
+  return out;
+}
+
+std::vector<int64_t> Gallery::identities_of(int64_t image_id) const {
+  std::shared_lock lock(mu_);
+  std::vector<int64_t> out;
+  if (image_id <= 0 || static_cast<uint64_t>(image_id) > image_faces_.size()) return out;
+  for (uint32_t r : image_faces_[static_cast<size_t>(image_id - 1)]) {
+    const int64_t id = identity_of(faces_.at(r));
+    if (id >= 0 && std::find(out.begin(), out.end(), id) == out.end()) out.push_back(id);
   }
   return out;
 }
@@ -218,6 +259,47 @@ uint64_t Gallery::pixels_of(int64_t image_id) const {
   return static_cast<uint64_t>(s.width) * static_cast<uint64_t>(s.height);
 }
 
+bool Gallery::passes_gate(const DetectedFace& f) const {
+  return face_size_px(f.box) >= static_cast<float>(cfg_.index_min_face_px) && f.det_score >= cfg_.index_min_det;
+}
+
+bool Gallery::passes_gate(const FaceSlot& s) const {
+  const BBox b{s.x1, s.y1, s.x2, s.y2};
+  return face_size_px(b) >= static_cast<float>(cfg_.index_min_face_px) && s.det_score >= cfg_.index_min_det;
+}
+
+void Gallery::append_face_locked(uint64_t image_id, const DetectedFace& f, int64_t now) {
+  const uint64_t row = faces_.size();
+  FaceSlot fs = make_face_slot(row, image_id, f, now);
+  if (!passes_gate(f)) fs.flags |= kLowQuality;
+  faces_.append(fs);
+  EmbF32 e{};
+  std::memcpy(e.v, f.embedding.data(), sizeof(float) * kDim);
+  embs_.append(e);
+  EmbI8 q{};
+  quantize_i8(e.v, q.v);
+  embs_i8_.append(q);
+  flags_cache_.push_back(fs.flags);
+  track_image_face_locked(image_id, row);
+  if (face_indexable(fs.flags)) {
+    hnsw_.add(row, e.v);
+    try_join_identity_locked(row);
+  }
+}
+
+void Gallery::tombstone_face_locked(uint64_t row) {
+  FaceSlot& f = faces_.at(row);
+  if (!slot_live(f.flags)) return;
+  unassign_locked(row);
+  f.flags |= kTombstone;
+  flags_cache_[static_cast<size_t>(row)] |= kTombstone;
+  hnsw_.remove(row);
+  if (f.image_id > 0 && f.image_id <= image_faces_.size()) {
+    auto& rows = image_faces_[static_cast<size_t>(f.image_id - 1)];
+    rows.erase(std::remove(rows.begin(), rows.end(), static_cast<uint32_t>(row)), rows.end());
+  }
+}
+
 int64_t Gallery::insert(std::span<const uint8_t> bytes, const cv::Mat& bgr, const std::array<uint8_t, 32>& sha,
                         Mime mime, PerceptualHash ph, const std::vector<DetectedFace>& faces) {
   std::unique_lock lock(mu_);
@@ -238,20 +320,9 @@ int64_t Gallery::insert(std::span<const uint8_t> bytes, const cv::Mat& bgr, cons
   im.updated_at = static_cast<uint64_t>(now);
   im.nfaces = static_cast<uint32_t>(faces.size());
   const uint64_t idx = images_.append(im);
+  image_faces_.emplace_back();
 
-  for (const auto& f : faces) {
-    const uint64_t row = faces_.size();
-    FaceSlot fs = make_face_slot(row, im.image_id, f, now);
-    faces_.append(fs);
-    EmbF32 e{};
-    std::memcpy(e.v, f.embedding.data(), sizeof(float) * kDim);
-    embs_.append(e);
-    EmbI8 q{};
-    quantize_i8(e.v, q.v);
-    embs_i8_.append(q);
-    flags_cache_.push_back(0);
-    hnsw_.add(row, e.v);
-  }
+  for (const auto& f : faces) append_face_locked(im.image_id, f, now);
 
   ShaKey k;
   k.v = sha;
@@ -260,6 +331,8 @@ int64_t Gallery::insert(std::span<const uint8_t> bytes, const cv::Mat& bgr, cons
   faces_.sync_header();
   embs_.sync_header();
   embs_i8_.sync_header();
+  identities_.sync_header();
+  centroids_.sync_header();
   return static_cast<int64_t>(im.image_id);
 }
 
@@ -294,10 +367,7 @@ std::vector<FaceView> Gallery::upgrade(int64_t image_id, std::span<const uint8_t
   sha_to_idx_[newk] = static_cast<uint64_t>(image_id - 1);
 
   std::vector<uint64_t> old_rows;
-  for (uint64_t i = 0; i < faces_.size(); ++i) {
-    if (slot_live(faces_.at(i).flags) && static_cast<int64_t>(faces_.at(i).image_id) == image_id)
-      old_rows.push_back(i);
-  }
+  for (uint32_t r : image_faces_[static_cast<size_t>(image_id - 1)]) old_rows.push_back(r);
 
   std::vector<char> old_used(old_rows.size(), 0);
   std::vector<char> new_used(new_faces.size(), 0);
@@ -317,6 +387,7 @@ std::vector<FaceView> Gallery::upgrade(int64_t image_id, std::span<const uint8_t
   std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.s > b.s; });
 
   const int64_t now = unix_ms();
+  std::vector<int64_t> touched_identities;
   for (const auto& p : pairs) {
     if (new_used[static_cast<size_t>(p.ni)] || old_used[static_cast<size_t>(p.oi)]) continue;
     new_used[static_cast<size_t>(p.ni)] = 1;
@@ -338,48 +409,50 @@ std::vector<FaceView> Gallery::upgrade(int64_t image_id, std::span<const uint8_t
     embs_.at(row) = e;
     EmbI8 q{};
     quantize_i8(e.v, q.v);
-    if (row < embs_i8_.size()) embs_i8_.at(row) = q;
-    hnsw_.update(row, e.v);
+    embs_i8_.at(row) = q;
+    const bool was_indexable = face_indexable(fs.flags);
+    fs.flags = (fs.flags & ~kLowQuality) | (passes_gate(nf) ? 0u : kLowQuality);
+    flags_cache_[static_cast<size_t>(row)] = fs.flags;
+    const bool now_indexable = face_indexable(fs.flags);
+    if (now_indexable) {
+      if (was_indexable) hnsw_.update(row, e.v);
+      else hnsw_.add(row, e.v);
+      const int64_t id = identity_of(fs);
+      if (id >= 0) touched_identities.push_back(id);
+      else try_join_identity_locked(row);
+    } else {
+      if (was_indexable) hnsw_.remove(row);
+      unassign_locked(row);
+    }
   }
 
   for (int ni = 0; ni < static_cast<int>(new_faces.size()); ++ni) {
     if (new_used[static_cast<size_t>(ni)]) continue;
-    const uint64_t row = faces_.size();
-    FaceSlot fs = make_face_slot(row, static_cast<uint64_t>(image_id), new_faces[static_cast<size_t>(ni)], now);
-    faces_.append(fs);
-    EmbF32 e{};
-    std::memcpy(e.v, new_faces[static_cast<size_t>(ni)].embedding.data(), sizeof(float) * kDim);
-    embs_.append(e);
-    EmbI8 q{};
-    quantize_i8(e.v, q.v);
-    embs_i8_.append(q);
-    flags_cache_.push_back(0);
-    hnsw_.add(row, e.v);
+    append_face_locked(static_cast<uint64_t>(image_id), new_faces[static_cast<size_t>(ni)], now);
   }
 
   for (int oi = 0; oi < static_cast<int>(old_rows.size()); ++oi) {
     if (old_used[static_cast<size_t>(oi)]) continue;
-    const uint64_t row = old_rows[static_cast<size_t>(oi)];
-    faces_.at(row).flags |= kTombstone;
-    flags_cache_[static_cast<size_t>(row)] |= kTombstone;
-    hnsw_.remove(row);
+    tombstone_face_locked(old_rows[static_cast<size_t>(oi)]);
   }
+  // Remapped faces changed their embeddings: refresh the identities they belong to.
+  std::sort(touched_identities.begin(), touched_identities.end());
+  touched_identities.erase(std::unique(touched_identities.begin(), touched_identities.end()),
+                           touched_identities.end());
+  for (int64_t id : touched_identities) recompute_identity_locked(id, now);
 
-  uint32_t live = 0;
-  for (uint64_t i = 0; i < faces_.size(); ++i)
-    if (slot_live(faces_.at(i).flags) && static_cast<int64_t>(faces_.at(i).image_id) == image_id) ++live;
-  im.nfaces = live;
+  im.nfaces = static_cast<uint32_t>(image_faces_[static_cast<size_t>(image_id - 1)].size());
 
   unlink_master(old_sha);
   images_.sync_header();
   faces_.sync_header();
   embs_.sync_header();
+  embs_i8_.sync_header();
+  identities_.sync_header();
+  centroids_.sync_header();
 
   std::vector<FaceView> out;
-  for (uint64_t i = 0; i < faces_.size(); ++i) {
-    const auto& f = faces_.at(i);
-    if (slot_live(f.flags) && static_cast<int64_t>(f.image_id) == image_id) out.push_back(face_from_slot(f));
-  }
+  for (uint32_t r : image_faces_[static_cast<size_t>(image_id - 1)]) out.push_back(face_from_slot(faces_.at(r)));
   return out;
 }
 
@@ -394,83 +467,216 @@ bool Gallery::remove_image(int64_t image_id) {
   ShaKey k;
   k.v = sha;
   sha_to_idx_.erase(k);
-  for (uint64_t i = 0; i < faces_.size(); ++i) {
-    auto& f = faces_.at(i);
-    if (slot_live(f.flags) && static_cast<int64_t>(f.image_id) == image_id) {
-      f.flags |= kTombstone;
-      flags_cache_[static_cast<size_t>(i)] |= kTombstone;
-      hnsw_.remove(i);
-    }
-  }
+  const std::vector<uint32_t> rows = image_faces_[static_cast<size_t>(image_id - 1)];
+  for (uint32_t r : rows) tombstone_face_locked(r);
   unlink_master(sha);
   images_.sync_header();
   faces_.sync_header();
+  identities_.sync_header();
   return true;
+}
+
+Hit Gallery::hydrate_one(uint64_t row, float score, bool& ok) const {
+  Hit h;
+  ok = false;
+  if (row >= faces_.size()) return h;
+  const auto& s = faces_.at(row);
+  if (!slot_live(s.flags)) return h;
+  if (s.image_id == 0 || s.image_id > images_.size()) return h;
+  const auto& image = images_.at(s.image_id - 1);
+  if (!slot_live(image.flags)) return h;
+  h.face_id = static_cast<int64_t>(s.face_id);
+  h.image_id = static_cast<int64_t>(s.image_id);
+  std::memcpy(h.sha256.data(), image.sha256, h.sha256.size());
+  h.row = static_cast<int64_t>(row);
+  h.score = score;
+  h.box = {s.x1, s.y1, s.x2, s.y2};
+  h.det_score = s.det_score;
+  h.quality = face_quality(s.det_score, h.box);
+  h.flags = s.flags;
+  h.identity_id = identity_of(s);
+  ok = true;
+  return h;
 }
 
 std::vector<Hit> Gallery::hydrate(const std::vector<ScanHit>& rows) const {
   std::vector<Hit> out;
   out.reserve(rows.size());
   for (const auto& r : rows) {
-    if (r.row >= faces_.size()) continue;
-    const auto& s = faces_.at(r.row);
-    if (!slot_live(s.flags)) continue;
-    Hit h;
-    h.face_id = static_cast<int64_t>(s.face_id);
-    h.image_id = static_cast<int64_t>(s.image_id);
-    if (s.image_id == 0 || s.image_id > images_.size()) continue;
-    const auto& image = images_.at(s.image_id - 1);
-    if (!slot_live(image.flags)) continue;
-    std::memcpy(h.sha256.data(), image.sha256, h.sha256.size());
-    h.row = static_cast<int64_t>(r.row);
-    h.score = r.score;
-    h.box = {s.x1, s.y1, s.x2, s.y2};
-    h.det_score = s.det_score;
+    bool ok = false;
+    Hit h = hydrate_one(r.row, r.score, ok);
+    if (ok) out.push_back(h);
+  }
+  return out;
+}
+
+std::vector<ScanHit> Gallery::candidates_locked(const float* query, int want, float min_score,
+                                                bool include_low_quality, bool range) const {
+  const uint64_t n = std::min(embs_.size(), faces_.size());
+  if (n == 0 || want <= 0) return {};
+  const float* rows = embs_.at(0).v;
+  const uint32_t* flags = flags_cache_.empty() ? nullptr : flags_cache_.data();
+  const uint32_t skip = include_low_quality ? kTombstone : (kTombstone | kLowQuality);
+
+  const bool exact = n < cfg_.exact_until || include_low_quality || hnsw_.size() == 0;
+  if (exact) {
+    if (cfg_.i8_scan && embs_i8_.size() >= n) {
+      // int8 first pass with a wider pool, then exact f32 rerank. The
+      // quantization error on a cosine is ~0.003, so a 0.02 margin on the
+      // floor and a 4x pool keep the reranked top-k exact in practice.
+      int8_t q8[kDim];
+      quantize_i8(query, q8);
+      const int pool = std::max(want * 4, want + 32);
+      auto cand = exact_topk_i8(embs_i8_.at(0).v, n, q8, pool, flags, min_score - 0.02f, skip);
+      std::vector<ScanHit> rerank;
+      rerank.reserve(cand.size());
+      for (const auto& c : cand) {
+        const float s = dot512(query, rows + c.row * kDim);
+        if (s >= min_score) rerank.push_back(ScanHit{c.row, s});
+      }
+      std::sort(rerank.begin(), rerank.end(), [](auto& a, auto& b) { return a.score > b.score; });
+      if (static_cast<int>(rerank.size()) > want) rerank.resize(static_cast<size_t>(want));
+      return rerank;
+    }
+    return exact_topk_f32(rows, n, query, want, flags, min_score, skip);
+  }
+
+  int pool = range ? std::max(64, want) : std::max(want * 8, 64);
+  const int max_pool = std::max(pool, cfg_.max_range);
+  for (;;) {
+    auto approx = hnsw_.search(query, pool);
+    std::vector<ScanHit> rerank;
+    rerank.reserve(approx.size());
+    for (auto& [row, _] : approx) {
+      if (row >= n) continue;
+      if (flags && (flags[row] & skip)) continue;
+      const float s = dot512(query, rows + row * kDim);
+      if (s < min_score) continue;
+      rerank.push_back(ScanHit{row, s});
+    }
+    // Range mode: if everything the pool returned clears the floor, there may
+    // be more beyond it — widen and retry until the pool has slack.
+    const bool saturated = !approx.empty() && rerank.size() == approx.size() &&
+                           static_cast<int>(approx.size()) >= pool;
+    if (range && saturated && pool < max_pool) {
+      pool = std::min(max_pool, pool * 2);
+      continue;
+    }
+    std::sort(rerank.begin(), rerank.end(), [](auto& a, auto& b) { return a.score > b.score; });
+    if (static_cast<int>(rerank.size()) > want) rerank.resize(static_cast<size_t>(want));
+    return rerank;
+  }
+}
+
+std::vector<Hit> Gallery::group_hits(std::vector<Hit> hits, int k) const {
+  std::vector<Hit> out;
+  std::unordered_map<int64_t, size_t> slot;
+  for (auto& h : hits) {
+    if (h.identity_id < 0) {
+      if (static_cast<int>(out.size()) < k) out.push_back(h);
+      continue;
+    }
+    auto it = slot.find(h.identity_id);
+    if (it != slot.end()) {
+      ++out[it->second].collapsed;
+      continue;
+    }
+    if (static_cast<int>(out.size()) >= k) continue;
+    slot[h.identity_id] = out.size();
     out.push_back(h);
   }
   return out;
 }
 
-std::vector<Hit> Gallery::search(const float* query, int k, float min_score) const {
-  std::shared_lock lock(mu_);
-  const uint64_t n = std::min(embs_.size(), faces_.size());
-  if (n == 0) return {};
-  const float* rows = embs_.at(0).v;
-  const uint32_t* flags = flags_cache_.empty() ? nullptr : flags_cache_.data();
+std::vector<Hit> Gallery::search_locked(const float* query, const SearchOptions& opts) const {
+  const int k = std::max(opts.k, 1);
+  int want = k;
+  if (opts.range) want = std::max(cfg_.max_range, k);
+  else if (opts.group_by_identity) want = std::max(k * 8, 64);
+  auto hits = hydrate(candidates_locked(query, want, opts.min_score, opts.include_low_quality, opts.range));
+  if (opts.group_by_identity) return group_hits(std::move(hits), k);
+  if (!opts.range && static_cast<int>(hits.size()) > k) hits.resize(static_cast<size_t>(k));
+  return hits;
+}
 
-  std::vector<ScanHit> cand;
-  if (n < cfg_.exact_until) {
-    cand = exact_topk_f32(rows, n, query, k, flags, min_score);
-  } else {
-    auto approx = hnsw_.search(query, std::max(k * 8, 64));
-    std::vector<ScanHit> rerank;
-    rerank.reserve(approx.size());
-    for (auto& [row, _] : approx) {
-      if (row >= n) continue;
-      if (flags && (flags[row] & kTombstone)) continue;
-      const float s = dot512(query, rows + row * kDim);
-      if (s < min_score) continue;
-      rerank.push_back(ScanHit{row, s});
-    }
-    std::sort(rerank.begin(), rerank.end(), [](auto& a, auto& b) { return a.score > b.score; });
-    if (static_cast<int>(rerank.size()) > k) rerank.resize(static_cast<size_t>(k));
-    cand = std::move(rerank);
-  }
-  return hydrate(cand);
+std::vector<Hit> Gallery::search(const float* query, const SearchOptions& opts) const {
+  std::shared_lock lock(mu_);
+  return search_locked(query, opts);
+}
+
+std::vector<Hit> Gallery::search(const float* query, int k, float min_score) const {
+  SearchOptions o;
+  o.k = k;
+  o.min_score = min_score;
+  return search(query, o);
+}
+
+std::vector<std::vector<Hit>> Gallery::search_batch(const float* queries, int nq, const SearchOptions& opts) const {
+  std::shared_lock lock(mu_);
+  std::vector<std::vector<Hit>> out;
+  out.reserve(static_cast<size_t>(nq));
+  for (int i = 0; i < nq; ++i) out.push_back(search_locked(queries + i * kDim, opts));
+  return out;
 }
 
 std::vector<std::vector<Hit>> Gallery::search_batch(const float* queries, int nq, int k, float min_score) const {
-  std::vector<std::vector<Hit>> out;
-  out.reserve(static_cast<size_t>(nq));
-  for (int i = 0; i < nq; ++i) out.push_back(search(queries + i * kDim, k, min_score));
-  return out;
+  SearchOptions o;
+  o.k = k;
+  o.min_score = min_score;
+  return search_batch(queries, nq, o);
+}
+
+ReindexReport Gallery::reindex() {
+  std::unique_lock lock(mu_);
+  const auto t0 = std::chrono::steady_clock::now();
+  const int64_t now = unix_ms();
+  ReindexReport r;
+  const uint64_t n = std::min(embs_.size(), faces_.size());
+  r.rows = n;
+  std::vector<int64_t> touched;
+  for (uint64_t i = 0; i < n; ++i) {
+    FaceSlot& f = faces_.at(i);
+    if (!slot_live(f.flags)) continue;
+    ++r.live;
+    const uint32_t nf = (f.flags & ~kLowQuality) | (passes_gate(f) ? 0u : kLowQuality);
+    if ((nf & kLowQuality) && identity_of(f) >= 0) {
+      touched.push_back(identity_of(f));
+      f.identity_ref = 0;
+      ++r.unassigned_by_gate;
+    }
+    f.flags = nf;
+    flags_cache_[static_cast<size_t>(i)] = nf;
+    if (nf & kLowQuality) ++r.low_quality;
+  }
+  while (embs_i8_.size() < n) embs_i8_.append(EmbI8{});
+  for (uint64_t i = 0; i < n; ++i) quantize_i8(embs_.at(i).v, embs_i8_.at(i).v);
+  embs_i8_.set_version(kI8FileVersion);
+  r.requantized = n;
+  hnsw_.rebuild_from(n ? embs_.at(0).v : nullptr, n, flags_cache_.data());
+  r.indexed = hnsw_.size();
+  if (!touched.empty()) {
+    // membership lists must be rebuilt before recomputing the touched identities
+    load_identity_state_locked();
+    std::sort(touched.begin(), touched.end());
+    touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+    for (int64_t id : touched) recompute_identity_locked(id, now);
+  }
+  faces_.fsync_all();
+  embs_i8_.fsync_all();
+  identities_.fsync_all();
+  centroids_.fsync_all();
+  hnsw_.save();
+  r.ms = ms_since(t0);
+  spdlog::info("reindex rows={} live={} low_quality={} indexed={} unassigned_by_gate={} {:.0f}ms", r.rows, r.live,
+               r.low_quality, r.indexed, r.unassigned_by_gate, r.ms);
+  return r;
 }
 
 uint64_t Gallery::live_faces() const {
   std::shared_lock lock(mu_);
   uint64_t n = 0;
-  for (uint64_t i = 0; i < faces_.size(); ++i)
-    if (slot_live(faces_.at(i).flags)) ++n;
+  for (uint32_t f : flags_cache_)
+    if (slot_live(f)) ++n;
   return n;
 }
 
@@ -479,6 +685,26 @@ uint64_t Gallery::live_images() const {
   uint64_t n = 0;
   for (uint64_t i = 0; i < images_.size(); ++i)
     if (slot_live(images_.at(i).flags)) ++n;
+  return n;
+}
+
+uint64_t Gallery::indexed_faces() const { return hnsw_.size(); }
+
+uint64_t Gallery::low_quality_faces() const {
+  std::shared_lock lock(mu_);
+  uint64_t n = 0;
+  for (uint32_t f : flags_cache_)
+    if (slot_live(f) && (f & kLowQuality)) ++n;
+  return n;
+}
+
+uint64_t Gallery::unassigned_faces() const {
+  std::shared_lock lock(mu_);
+  uint64_t n = 0;
+  for (uint64_t i = 0; i < faces_.size(); ++i) {
+    const auto& f = faces_.at(i);
+    if (face_indexable(f.flags) && f.identity_ref == 0) ++n;
+  }
   return n;
 }
 
@@ -493,6 +719,8 @@ void Gallery::flush() {
   faces_.fsync_all();
   embs_.fsync_all();
   embs_i8_.fsync_all();
+  identities_.fsync_all();
+  centroids_.fsync_all();
   hnsw_.save();
 }
 

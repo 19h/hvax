@@ -63,6 +63,68 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    if (cfg.reindex) {
+      const auto r = engine.reindex();
+      std::cout << nlohmann::json{{"rows", r.rows},
+                                  {"live", r.live},
+                                  {"low_quality", r.low_quality},
+                                  {"indexed", r.indexed},
+                                  {"unassigned_by_gate", r.unassigned_by_gate},
+                                  {"requantized", r.requantized},
+                                  {"ms", r.ms}}
+                       .dump(2)
+                << "\n";
+      if (!cfg.cluster_once && cfg.eval_impostor_pairs == 0) return 0;
+    }
+    if (cfg.cluster_once) {
+      const auto r = engine.recluster();
+      if (!r) {
+        spdlog::error("clustering already running");
+        return 1;
+      }
+      std::cout << nlohmann::json{{"faces_eligible", r->faces_eligible},
+                                  {"faces_assigned", r->faces_assigned},
+                                  {"identities", r->identities},
+                                  {"identities_pinned", r->identities_pinned},
+                                  {"clusters_before_merge", r->clusters_before_merge},
+                                  {"merged", r->merged},
+                                  {"singletons_dropped", r->singletons_dropped},
+                                  {"largest", r->largest},
+                                  {"edges", r->edges},
+                                  {"iterations", r->iterations},
+                                  {"knn_ms", r->knn_ms},
+                                  {"cw_ms", r->cw_ms},
+                                  {"merge_ms", r->merge_ms},
+                                  {"apply_ms", r->apply_ms},
+                                  {"total_ms", r->total_ms}}
+                       .dump(2)
+                << "\n";
+      if (cfg.eval_impostor_pairs == 0) return 0;
+    }
+    if (cfg.eval_impostor_pairs > 0) {
+      const auto r = engine.impostor_eval(static_cast<uint64_t>(cfg.eval_impostor_pairs));
+      auto table = [](const std::vector<std::pair<float, double>>& v) {
+        nlohmann::json a = nlohmann::json::array();
+        for (auto& [t, x] : v) a.push_back({{"threshold", t}, {"value", x}});
+        return a;
+      };
+      std::cout << nlohmann::json{{"images_used", r.images_used},
+                                  {"same_image_pairs", r.same_image_pairs},
+                                  {"random_pairs", r.random_pairs},
+                                  {"same_image_mean", r.same_image_mean},
+                                  {"same_image_sd", r.same_image_sd},
+                                  {"random_mean", r.random_mean},
+                                  {"random_sd", r.random_sd},
+                                  {"random_mode", r.random_mode},
+                                  {"impostor_ceiling", r.impostor_ceiling},
+                                  {"same_image_far", table(r.same_image_far)},
+                                  {"random_above", table(r.random_above)},
+                                  {"random_same_identity_excess", table(r.random_excess)}}
+                       .dump(2)
+                << "\n";
+      return 0;
+    }
+
     if (!cfg.once_image.empty()) {
       cv::Mat img = cv::imread(cfg.once_image, cv::IMREAD_COLOR);
       if (img.empty()) {

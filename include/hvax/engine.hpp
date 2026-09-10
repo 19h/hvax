@@ -1,12 +1,14 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <semaphore>
 #include <span>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hvax/config.hpp"
@@ -23,7 +25,17 @@ struct Metrics {
   std::atomic<uint64_t> master_replace{0};
   std::atomic<uint64_t> query_emb{0};
   std::atomic<uint64_t> query_img{0};
+  std::atomic<uint64_t> query_identity{0};
   std::atomic<uint64_t> query_us_sum{0};
+  std::atomic<uint64_t> crops{0};
+  std::atomic<uint64_t> cluster_runs{0};
+  std::atomic<uint64_t> cluster_ms_last{0};
+};
+
+struct CropOptions {
+  int size = 160;       // output edge in px (square)
+  float pad = 0.3f;     // margin around the box as a fraction of its size
+  int jpeg_quality = 88;
 };
 
 class Engine {
@@ -37,20 +49,39 @@ class Engine {
   IngestCheckResult check_ingest(const std::array<uint8_t, 32>& sha, uint64_t phash, uint64_t dhash, int width,
                                  int height) const;
   std::vector<Hit> query_embedding(std::span<const float> vec, int k, float min_score);
+  std::vector<Hit> query_embedding(std::span<const float> vec, const SearchOptions& opts);
   std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, int k, float min_score);
+  std::vector<std::vector<Hit>> query_embedding_batch(std::span<const float> vecs, int nq, const SearchOptions& opts);
   std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes, int k,
                                                                      float min_score);
+  std::vector<std::pair<DetectedFace, std::vector<Hit>>> query_image(std::span<const uint8_t> bytes,
+                                                                     const SearchOptions& opts);
+  // Identity mode: people ranked by centroid cosine.
+  std::vector<IdentityHit> query_embedding_identities(std::span<const float> vec, int k, float min_score);
+  std::vector<std::pair<DetectedFace, std::vector<IdentityHit>>> query_image_identities(
+      std::span<const uint8_t> bytes, int k, float min_score);
 
   ImageView get_image(int64_t id) const { return gallery_->image(id); }
   ImageView get_image(const std::array<uint8_t, 32>& sha) const;
   FaceView get_face(int64_t id) const { return gallery_->face(id); }
   bool get_face_embedding(int64_t id, Embedding& e) const { return gallery_->face_embedding(id, e); }
+  // JPEG crop of a stored face from its master image. Returns false if the
+  // face or the master file does not exist.
+  bool face_crop(int64_t face_id, const CropOptions& opts, std::vector<uint8_t>& jpeg) const;
   std::filesystem::path image_file(int64_t id) const;
   std::filesystem::path image_file(const std::array<uint8_t, 32>& sha) const;
   std::string image_mime(int64_t id) const;
   std::string image_mime(const std::array<uint8_t, 32>& sha) const;
   bool delete_image(int64_t id) { return gallery_->remove_image(id); }
   bool delete_image(const std::array<uint8_t, 32>& sha);
+
+  // Maintenance.
+  std::optional<ClusterReport> recluster();
+  ReindexReport reindex();
+  ImpostorReport impostor_eval(uint64_t max_pairs, uint64_t seed = 1) const;
+  ClusterParams cluster_params() const;
+  void start_background_cluster();  // honours cfg.cluster_interval_s
+  void stop_background_cluster();
 
   const Config& config() const { return cfg_; }
   Gallery& gallery() { return *gallery_; }
@@ -73,7 +104,11 @@ class Engine {
   std::unique_ptr<Gallery> gallery_;
   std::mutex pipeline_mu_;
   std::mutex ingest_mu_;
-  Metrics metrics_;
+  mutable Metrics metrics_;
+  std::thread cluster_thread_;
+  std::mutex cluster_cv_mu_;
+  std::condition_variable cluster_cv_;
+  bool cluster_stop_ = false;
 };
 
 }  // namespace hvax

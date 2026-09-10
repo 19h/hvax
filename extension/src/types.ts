@@ -29,6 +29,8 @@ export type Stats = {
   ignored: number;
   duplicates: number;
   errors: number;
+  faces: number;
+  known: number;
   lastError: string;
   lastStatus: string;
 };
@@ -40,6 +42,8 @@ export const EMPTY_STATS: Stats = {
   ignored: 0,
   duplicates: 0,
   errors: 0,
+  faces: 0,
+  known: 0,
   lastError: "",
   lastStatus: "",
 };
@@ -80,4 +84,22 @@ export type ServerStats = {
   images: number;
   embedding_rows: number;
   hnsw: boolean;
+  identities?: number;
+  indexed_faces?: number;
+  unassigned_faces?: number;
+};
+
+export type IngestFace = {
+  face_id: number;
+  identity_id?: number | null;
+  low_quality?: boolean;
+  quality?: number;
+};
+
+export type IngestResponse = {
+  image_id?: number;
+  duplicate?: boolean;
+  duplicate_kind?: string;
+  master_replaced?: boolean;
+  faces?: IngestFace[];
 };

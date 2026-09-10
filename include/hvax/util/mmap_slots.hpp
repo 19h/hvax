@@ -34,7 +34,7 @@ class SlotFile {
 
   ~SlotFile() { close(); }
 
-  void open(const std::filesystem::path& path, const char* magic) {
+  void open(const std::filesystem::path& path, const char* magic, uint32_t version = 1) {
     close();
     path_ = path;
     std::memcpy(magic_, magic, 8);
@@ -51,7 +51,7 @@ class SlotFile {
       header()->count = 0;
       header()->capacity = capacity_;
       std::memcpy(header()->magic, magic_, 8);
-      header()->version = 1;
+      header()->version = version;
       header()->rec_size = static_cast<uint32_t>(sizeof(T));
       msync(map_, sizeof(SlotFileHeader), MS_SYNC);
     } else {
@@ -66,6 +66,7 @@ class SlotFile {
       count_ = h->count;
       capacity_ = h->capacity;
       if (capacity_ < count_) throw std::runtime_error("corrupt slots header");
+      if (sizeof(SlotFileHeader) + capacity_ * sizeof(T) > map_size_) throw std::runtime_error("slots file truncated");
     }
   }
 
@@ -80,11 +81,20 @@ class SlotFile {
     }
   }
 
+  bool is_open() const { return map_ != nullptr && map_ != MAP_FAILED; }
   uint64_t size() const { return count_; }
   uint64_t capacity() const { return capacity_; }
+  uint32_t version() const { return is_open() ? header()->version : 0; }
+  void set_version(uint32_t v) {
+    if (!is_open()) return;
+    header()->version = v;
+    msync(map_, sizeof(SlotFileHeader), MS_SYNC);
+  }
 
   T& at(uint64_t i) { return recs()[i]; }
   const T& at(uint64_t i) const { return recs()[i]; }
+  T* data() { return recs(); }
+  const T* data() const { return recs(); }
 
   uint64_t append(const T& rec) {
     if (count_ >= capacity_) grow();
@@ -93,6 +103,13 @@ class SlotFile {
     ++count_;
     header()->count = count_;
     return idx;
+  }
+
+  // Drop every record; the file keeps its capacity. Used by the identity
+  // rebuild, which rewrites the whole table under the gallery's exclusive lock.
+  void clear() {
+    count_ = 0;
+    header()->count = 0;
   }
 
   void sync_header() {
@@ -111,6 +128,7 @@ class SlotFile {
 
  private:
   SlotFileHeader* header() { return reinterpret_cast<SlotFileHeader*>(map_); }
+  const SlotFileHeader* header() const { return reinterpret_cast<const SlotFileHeader*>(map_); }
   T* recs() { return reinterpret_cast<T*>(static_cast<char*>(map_) + sizeof(SlotFileHeader)); }
   const T* recs() const {
     return reinterpret_cast<const T*>(static_cast<const char*>(map_) + sizeof(SlotFileHeader));
