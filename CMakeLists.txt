@@ -24,7 +24,7 @@ endif()
 
 # --- OpenCV (Ubuntu splits the CMake package; find libs directly) ---
 find_path(OpenCV_INCLUDE_DIR opencv2/core.hpp
-  HINTS /usr/include/opencv4 /opt/homebrew/opt/opencv/include/opencv4
+  HINTS /usr/include/opencv4 /opt/homebrew/opt/opencv/include/opencv5 /opt/homebrew/opt/opencv/include/opencv4
   REQUIRED)
 find_library(OpenCV_CORE_LIB opencv_core HINTS /opt/homebrew/opt/opencv/lib REQUIRED)
 find_library(OpenCV_IMGPROC_LIB opencv_imgproc HINTS /opt/homebrew/opt/opencv/lib REQUIRED)
