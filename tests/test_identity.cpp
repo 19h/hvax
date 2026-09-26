@@ -158,7 +158,7 @@ TwoPeople seed_two_people(hvax::Gallery& g) {
 void check_identity_layer(hvax::Config cfg) {
   auto dir = std::filesystem::path(cfg.data_dir);
   hvax::Gallery g(cfg);
-  seed_two_people(g);
+  const TwoPeople seeded = seed_two_people(g);
   EXPECT_EQ(g.identity_count(), 0u);
   EXPECT_EQ(g.unassigned_faces(), 8u);
 
@@ -233,6 +233,22 @@ void check_identity_layer(hvax::Config cfg) {
   ASSERT_EQ(co.size(), 1u);
   EXPECT_EQ(co[0].identity_id, id_b);
   EXPECT_EQ(co[0].shared_images, 1u);
+  // the photos behind that count, with each person's face in them
+  uint64_t shared_total = 0;
+  auto shared = g.shared_images(id_a, id_b, 0, 10, &shared_total);
+  EXPECT_EQ(shared_total, 1u);
+  ASSERT_EQ(shared.size(), 1u);
+  EXPECT_EQ(shared[0].image_id, seeded.image_ab);
+  ASSERT_EQ(shared[0].faces.size(), 1u);
+  ASSERT_EQ(shared[0].other_faces.size(), 1u);
+  EXPECT_EQ(shared[0].faces[0].identity_id, id_a);
+  EXPECT_EQ(shared[0].other_faces[0].identity_id, id_b);
+  auto reversed = g.shared_images(id_b, id_a, 0, 10);
+  ASSERT_EQ(reversed.size(), 1u);
+  EXPECT_EQ(reversed[0].faces[0].identity_id, id_b);
+  EXPECT_TRUE(g.shared_images(id_a, id_b, 1, 10, &shared_total).empty());
+  EXPECT_EQ(shared_total, 1u) << "the total ignores paging";
+  EXPECT_TRUE(g.shared_images(id_a, id_a, 0, 10).empty());
   auto tl = g.timeline(id_a, 86400000);
   uint32_t total = 0;
   for (auto& b : tl) total += b.faces;
@@ -501,6 +517,13 @@ TEST(Identity, HiddenIdentitiesAreSuppressedEverywhere) {
   EXPECT_EQ(g.list_identities(hvax::IdentitySort::size, 0, 10, true).size(), 2u);
   EXPECT_TRUE(g.cooccurring(id_a, 10).empty()) << "the hidden co-star is not reported";
   EXPECT_EQ(g.cooccurring(id_a, 10, true).size(), 1u);
+  EXPECT_TRUE(g.shared_images(id_a, id_b, 0, 10).empty());
+  EXPECT_TRUE(g.shared_images(id_b, id_a, 0, 10).empty());
+  auto shared_admin = g.shared_images(id_a, id_b, 0, 10, nullptr, true);
+  ASSERT_EQ(shared_admin.size(), 1u);
+  ASSERT_EQ(shared_admin[0].other_faces.size(), 1u);
+  EXPECT_TRUE(shared_admin[0].other_faces[0].hidden);
+  EXPECT_FALSE(shared_admin[0].faces[0].hidden);
   // template search skips hidden faces too
   std::array<hvax::Embedding, 1> pos{person_embedding(2, 2)};
   for (auto& h : g.search_template(pos, {}, {}, 10, -1.f)) EXPECT_NE(h.identity_id, id_b);

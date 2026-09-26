@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <queue>
@@ -361,6 +362,42 @@ std::vector<CooccurrenceEntry> Gallery::cooccurring(int64_t identity_id, uint64_
     return a.shared_images != b.shared_images ? a.shared_images > b.shared_images : a.identity_id < b.identity_id;
   });
   if (out.size() > limit) out.resize(static_cast<size_t>(limit));
+  return out;
+}
+
+std::vector<SharedImage> Gallery::shared_images(int64_t identity_id, int64_t other_id, uint64_t offset,
+                                                uint64_t limit, uint64_t* total, bool include_hidden) const {
+  std::shared_lock lock(mu_);
+  std::vector<SharedImage> out;
+  if (total) *total = 0;
+  if (identity_id == other_id || !identity_live(identity_id) || !identity_live(other_id)) return out;
+  if (!include_hidden && (hidden_[static_cast<size_t>(identity_id)] || hidden_[static_cast<size_t>(other_id)])) return out;
+  std::vector<uint64_t> images;
+  for (uint32_t r : members_[static_cast<size_t>(identity_id)]) {
+    const uint64_t img = faces_.at(r).image_id;
+    if (img == 0 || img > image_faces_.size()) continue;
+    for (uint32_t o : image_faces_[static_cast<size_t>(img - 1)]) {
+      if (identity_of(faces_.at(o)) != other_id) continue;
+      images.push_back(img);
+      break;
+    }
+  }
+  std::sort(images.begin(), images.end(), std::greater<>());
+  images.erase(std::unique(images.begin(), images.end()), images.end());
+  if (total) *total = images.size();
+  for (uint64_t i = offset; i < images.size() && out.size() < limit; ++i) {
+    const uint64_t img = images[static_cast<size_t>(i)];
+    SharedImage s;
+    s.image_id = static_cast<int64_t>(img);
+    for (uint32_t r : image_faces_[static_cast<size_t>(img - 1)]) {
+      const int64_t who = identity_of(faces_.at(r));
+      if (who != identity_id && who != other_id) continue;
+      auto& dst = who == identity_id ? s.faces : s.other_faces;
+      dst.push_back(face_from_slot(faces_.at(r)));
+      dst.back().hidden = hidden_[static_cast<size_t>(who)] != 0;
+    }
+    out.push_back(std::move(s));
+  }
   return out;
 }
 

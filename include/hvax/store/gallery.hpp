@@ -163,6 +163,9 @@ class Gallery {
   std::vector<FaceView> identity_faces(int64_t identity_id, FaceSort sort, uint64_t offset, uint64_t limit,
                                        std::vector<float>* scores = nullptr, bool include_hidden = false) const;
   std::vector<CooccurrenceEntry> cooccurring(int64_t identity_id, uint64_t limit, bool include_hidden = false) const;
+  // Photos both identities appear in, newest first; *total counts all of them.
+  std::vector<SharedImage> shared_images(int64_t identity_id, int64_t other_id, uint64_t offset, uint64_t limit,
+                                         uint64_t* total = nullptr, bool include_hidden = false) const;
   std::vector<TimelineBucket> timeline(int64_t identity_id, int64_t bucket_ms, bool include_hidden = false) const;
   bool identity_centroid(int64_t identity_id, Embedding& out) const;
 

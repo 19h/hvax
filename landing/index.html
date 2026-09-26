@@ -498,7 +498,7 @@
     display: block;
     background: #000;
   }
-  .pc b {
+  .pc b, .tg-img b {
     position: absolute;
     right: 2px;
     bottom: 2px;
@@ -511,6 +511,76 @@
     font-variant-numeric: tabular-nums;
   }
   .pc.on { border-color: var(--hot); }
+  .together {
+    grid-column: 1 / -1;
+    position: relative;
+    display: grid;
+    gap: 0.45rem;
+    margin: 0.15rem 0 0.2rem;
+    padding: 0.5rem 0.55rem 0.6rem;
+    border: 1px solid var(--hot);
+    background: var(--bg);
+    line-height: 1.45;
+  }
+  .together::before {
+    content: "";
+    position: absolute;
+    top: -6px;
+    left: calc(var(--caret, 2rem) - 5px);
+    width: 9px;
+    height: 9px;
+    background: var(--bg);
+    border-top: 1px solid var(--hot);
+    border-left: 1px solid var(--hot);
+    transform: rotate(45deg);
+  }
+  .tg-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.2rem 0.8rem;
+    color: var(--mute);
+    font-size: 12px;
+  }
+  .tg-head .me { color: var(--cyan); }
+  .tg-head .them { color: var(--hot); }
+  .tg-head button, .tg-more {
+    background: none;
+    border: 0;
+    color: var(--cyan);
+    font: inherit;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    padding: 0;
+  }
+  .tg-head button:hover, .tg-more:hover { color: var(--bright); }
+  .tg-more { justify-self: start; }
+  .tg-more[hidden] { display: none; }
+  .tg-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    gap: 0.4rem;
+  }
+  .tg-img {
+    position: relative;
+    display: block;
+    line-height: 0;
+    background: #000;
+    border: 1px solid transparent;
+  }
+  .tg-img:hover, .tg-img:focus-visible { border-color: var(--cyan); outline: none; }
+  .tg-img img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: contain;
+    background: #000;
+  }
+  .tg-img img.loading { opacity: 0.35; }
+  .tg-img img.load-failed { opacity: 0.55; box-shadow: inset 0 0 0 1px var(--warn); }
   .phead {
     display: flex;
     justify-content: space-between;
@@ -599,6 +669,7 @@
   @media (max-width: 560px) {
     .stats { grid-template-columns: 1fr 1fr 1fr; }
     .people-grid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); }
+    .tg-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
   }
   .adminbtn { color: var(--warn) !important; }
   .hiddentag { color: var(--warn); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -695,6 +766,7 @@
       <button type="button" data-path="/v1/identities/:id"><em>GET</em><code>/v1/identities/:id</code></button>
       <button type="button" data-path="/v1/identities/:id/faces"><em>GET</em><code>/v1/identities/:id/faces</code></button>
       <button type="button" data-path="/v1/identities/:id/cooccurring"><em>GET</em><code>/v1/identities/:id/cooccurring</code></button>
+      <button type="button" data-path="/v1/identities/:id/cooccurring/:other"><em>GET</em><code>/v1/identities/:id/cooccurring/:other</code></button>
       <button class="p" type="button" data-path="/v1/identities/cluster"><em>POST</em><code>/v1/identities/cluster</code></button>
     </div>
   </section>
@@ -747,6 +819,7 @@
   let resultPeopleGeneration = 0;
   const personStack = [];   // people visited before the one shown in #person
   let currentPerson = null;
+  let lastTogether = null;   // the "seen with" grid whose shared photos opened last
   let identityAdmin = false; // the key field holds the identity-management key
 
   hostEl.textContent = location.host || "local";
@@ -913,6 +986,113 @@
   function personLabel(p) {
     return p.name ? esc(p.name) : "#" + esc(p.identity_id);
   }
+  function plainLabel(p) {
+    return p.name ? String(p.name) : "#" + p.identity_id;
+  }
+  function seenWithGrid(p, cos) {
+    let html = "<h3>seen with</h3><div class='people-grid seenwith' data-owner='" + esc(p.identity_id) + "' data-owner-label='" + esc(plainLabel(p)) + "'>";
+    for (const c of cos) {
+      const label = plainLabel(c);
+      html += "<div class='pc' tabindex='0' role='button' aria-expanded='false' data-co='" + esc(c.identity_id) + "' data-label='" + esc(label) + "' title='" + esc(label) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + " · show them'>"
+        + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
+    }
+    return html + "</div>";
+  }
+
+  // "Seen with" tiles fold open the photos both people are in, right under
+  // the tile's row. The same tile, close or Escape folds them away; "open"
+  // still moves on to the other person.
+  function bindSeenWith(root) {
+    for (const grid of root.querySelectorAll(".seenwith")) {
+      for (const tile of grid.querySelectorAll("[data-co]")) {
+        const toggle = (e) => { e.preventDefault(); e.stopPropagation(); toggleTogether(grid, tile); };
+        tile.addEventListener("click", toggle);
+        tile.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") toggle(e); });
+      }
+    }
+  }
+  function closeTogether(grid) {
+    const panel = grid.querySelector(".together");
+    if (panel) panel.remove();
+    for (const tile of grid.querySelectorAll("[data-co]")) {
+      tile.classList.remove("on");
+      tile.setAttribute("aria-expanded", "false");
+    }
+    if (lastTogether === grid) lastTogether = null;
+  }
+  // after the last tile on the opened tile's row, caret under the tile
+  function placeTogether(grid) {
+    const tile = grid.querySelector("[data-co].on");
+    const panel = grid.querySelector(".together");
+    if (!tile || !panel) return;
+    panel.remove();
+    let last = tile;
+    while (last.nextElementSibling && last.nextElementSibling.offsetTop === tile.offsetTop) last = last.nextElementSibling;
+    last.after(panel);
+    panel.style.setProperty("--caret", Math.round(tile.offsetLeft - panel.offsetLeft + tile.offsetWidth / 2) + "px");
+  }
+  function toggleTogether(grid, tile) {
+    const was = grid.querySelector("[data-co].on");
+    closeTogether(grid);
+    if (was === tile) return;
+    const id = Number(grid.dataset.owner), other = Number(tile.dataset.co);
+    tile.classList.add("on");
+    tile.setAttribute("aria-expanded", "true");
+    const panel = document.createElement("div");
+    panel.className = "together";
+    panel.innerHTML = "<div class='tg-head'><span><span class='me'>" + esc(grid.dataset.ownerLabel) + "</span> with <span class='them'>"
+      + esc(tile.dataset.label) + "</span> · <span class='tg-count'>loading…</span></span>"
+      + "<span><button type='button' class='tg-open'>open " + esc(tile.dataset.label) + " →</button> · <button type='button' class='tg-close'>close</button></span></div>"
+      + "<div class='tg-grid'></div><button type='button' class='tg-more' hidden></button>";
+    grid.appendChild(panel);
+    placeTogether(grid);
+    lastTogether = grid;
+    panel.querySelector(".tg-open").addEventListener("click", () => openPerson(other));
+    panel.querySelector(".tg-close").addEventListener("click", () => { closeTogether(grid); tile.focus(); });
+    panel.querySelector(".tg-more").addEventListener("click", () => loadTogether(panel, id, other));
+    void loadTogether(panel, id, other);
+  }
+  async function loadTogether(panel, id, other) {
+    const offset = Number(panel.dataset.offset || 0);
+    const more = panel.querySelector(".tg-more");
+    more.hidden = true;
+    const j = await api("/v1/identities/" + id + "/cooccurring/" + other + "?offset=" + offset + "&limit=24");
+    if (!panel.isConnected) return;
+    const count = panel.querySelector(".tg-count");
+    if (!j) { count.textContent = "shared photos unavailable"; return; }
+    const images = j.images || [];
+    const total = Number(j.total) || 0;
+    panel.dataset.offset = offset + images.length;
+    count.textContent = total + " shared photo" + (total === 1 ? "" : "s");
+    const grid = panel.querySelector(".tg-grid");
+    for (const im of images) {
+      if (!im.sha256) continue;
+      const a = document.createElement("a");
+      a.className = "tg-img";
+      a.href = "/v1/images/" + im.sha256;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.title = "img " + im.image_id + " · open full image";
+      a.innerHTML = "<img alt='' class='loading'><b>" + esc(when(im.created_at)) + "</b>";
+      grid.appendChild(a);
+      const img = a.querySelector("img");
+      pairThumb(im).then((url) => {
+        img.classList.remove("loading");
+        if (url) img.src = url;
+        else img.classList.add("load-failed");
+      });
+    }
+    const left = total - offset - images.length;
+    more.textContent = "more · " + left + " left";
+    more.hidden = left <= 0 || images.length === 0;
+    if (offset === 0) {
+      // bring the photos up, but never scroll the opened tile off the top
+      const tile = panel.parentElement.querySelector("[data-co].on");
+      const overflow = panel.getBoundingClientRect().bottom - window.innerHeight + 8;
+      const room = tile ? tile.getBoundingClientRect().top - 8 : overflow;
+      if (overflow > 0 && room > 0) window.scrollBy(0, Math.min(overflow, room));
+    }
+  }
   function bindOpen(root, sel) {
     for (const el of root.querySelectorAll(sel)) {
       const open = (e) => { e.preventDefault(); e.stopPropagation(); openPerson(Number(el.getAttribute("data-id"))); };
@@ -998,17 +1178,10 @@
         html += "</div>";
       }
       const cos = (co && co.cooccurring) || [];
-      if (cos.length) {
-        html += "<h3>seen with</h3><div class='people-grid'>";
-        for (const c of cos) {
-          html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(c.identity_id) + "' title='" + (c.name ? esc(c.name) : "#" + esc(c.identity_id)) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + "'>"
-            + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
-        }
-        html += "</div>";
-      }
+      if (cos.length) html += seenWithGrid(p, cos);
       card.innerHTML = html;
       fillCrops(card);
-      bindOpen(card, "[data-id]");
+      bindSeenWith(card);
       bindHide(card);
       card.querySelector("[data-ref-person]").addEventListener("click", () => {
         setFeedback(Number(p.rep_face_id), "positive", { image_id: null, identity_id: id });
@@ -1033,8 +1206,8 @@
     else closePerson();
   }
 
-  // "seen with" tiles open the next person on top of this one; back pops
-  // the stack and, at the bottom, returns to the search results.
+  // "open" on a pair of people opens the next person on top of this one;
+  // back pops the stack and, at the bottom, returns to the search results.
   async function openPerson(id, push) {
     if (push !== false && currentPerson !== null && currentPerson !== id) personStack.push(currentPerson);
     currentPerson = id;
@@ -1070,17 +1243,10 @@
     }
     html += "</div>";
     const cos = (co && co.cooccurring) || [];
-    if (cos.length) {
-      html += "<h3>seen with</h3><div class='people-grid' id='pco'>";
-      for (const c of cos) {
-        html += "<div class='pc' tabindex='0' role='button' data-id='" + esc(c.identity_id) + "' title='" + (c.name ? esc(c.name) : "#" + esc(c.identity_id)) + " · " + esc(c.shared_images) + " shared photo" + (c.shared_images === 1 ? "" : "s") + "'>"
-          + "<img alt='' data-face='" + esc(c.rep_face_id) + "' data-size='96'><b>×" + esc(c.shared_images) + "</b></div>";
-      }
-      html += "</div>";
-    }
+    if (cos.length) html += seenWithGrid(p, cos);
     box.innerHTML = html;
     fillCrops(box);
-    bindOpen(box, "#pco .pc");
+    bindSeenWith(box);
     $("p-close").addEventListener("click", closePerson);
     $("p-back").addEventListener("click", personBack);
     bindHide(box);
@@ -1245,6 +1411,61 @@
       canvas.height = 256;
       canvas.getContext("2d").drawImage(image, x, y, sw, sh, 0, 0, 256, 256);
       const data = canvas.toDataURL("image/jpeg", 0.9);
+      cropThumbs.set(key, data);
+      return data;
+    } catch (e) {
+      return url;
+    }
+  }
+
+  // The part of a shared photo that holds both people, each boxed in their
+  // colour: cyan for the person the card is about, pink for the one seen with.
+  async function pairThumb(im) {
+    const box = (f) => f.bbox;
+    const ok = (b) => Array.isArray(b) && b.length === 4;
+    const mine = (im.faces || []).map(box).filter(ok);
+    const theirs = (im.other_faces || []).map(box).filter(ok);
+    const key = "pair:" + im.sha256 + ":" + JSON.stringify([mine, theirs]);
+    if (cropThumbs.has(key)) return cropThumbs.get(key);
+    const url = await thumb(im.sha256);
+    if (!url) return "";
+    try {
+      const image = await loadUrl(url);
+      const W = image.naturalWidth, H = image.naturalHeight;
+      const boxes = mine.concat(theirs);
+      let x1 = 0, y1 = 0, x2 = W, y2 = H;
+      if (boxes.length) {
+        let side = 0;
+        x1 = W; y1 = H; x2 = 0; y2 = 0;
+        for (const b of boxes) {
+          x1 = Math.min(x1, b[0]); y1 = Math.min(y1, b[1]);
+          x2 = Math.max(x2, b[2]); y2 = Math.max(y2, b[3]);
+          side = Math.max(side, b[2] - b[0], b[3] - b[1]);
+        }
+        x1 -= side * 0.6; y1 -= side * 0.6; x2 += side * 0.6; y2 += side * 0.6;
+      }
+      // widen to the tile's 4:3 around the pair, then keep it inside the photo
+      let w = x2 - x1, h = y2 - y1;
+      if (w * 3 < h * 4) { x1 -= (h * 4 / 3 - w) / 2; w = h * 4 / 3; }
+      else { y1 -= (w * 3 / 4 - h) / 2; h = w * 3 / 4; }
+      w = Math.min(w, W);
+      h = Math.min(h, H);
+      x1 = Math.max(0, Math.min(W - w, x1));
+      y1 = Math.max(0, Math.min(H - h, y1));
+      const scale = 360 / Math.max(w, h);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(w * scale));
+      canvas.height = Math.max(1, Math.round(h * scale));
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(image, x1, y1, w, h, 0, 0, canvas.width, canvas.height);
+      ctx.lineWidth = 2;
+      const stroke = (list, colour) => {
+        ctx.strokeStyle = colour;
+        for (const b of list) ctx.strokeRect((b[0] - x1) * scale, (b[1] - y1) * scale, (b[2] - b[0]) * scale, (b[3] - b[1]) * scale);
+      };
+      stroke(mine, "#41e0ff");
+      stroke(theirs, "#ff3e9a");
+      const data = canvas.toDataURL("image/jpeg", 0.88);
       cropThumbs.set(key, data);
       return data;
     } catch (e) {
@@ -2132,7 +2353,18 @@
   stage.addEventListener("drop", (e) => onFiles(e.dataTransfer.files));
   document.addEventListener("paste", onClipboardPaste);
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("person").hidden && !pasteTargetIsTextField(e.target)) personBack();
+    if (e.key !== "Escape" || pasteTargetIsTextField(e.target)) return;
+    if (lastTogether && lastTogether.isConnected) {
+      const grid = lastTogether;
+      const tile = grid.querySelector("[data-co].on");
+      closeTogether(grid);
+      if (tile) tile.focus();
+      return;
+    }
+    if (!$("person").hidden) personBack();
+  });
+  window.addEventListener("resize", () => {
+    for (const grid of document.querySelectorAll(".seenwith")) placeTogether(grid);
   });
   keyEl.addEventListener("input", () => {
     try { sessionStorage.setItem("hvax-key", keyEl.value); } catch (e) {}

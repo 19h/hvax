@@ -711,6 +711,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       << "GET    /v1/identities/:id\n"
       << "GET    /v1/identities/:id/faces\n"
       << "GET    /v1/identities/:id/cooccurring\n"
+      << "GET    /v1/identities/:id/cooccurring/:other\n"
       << "GET    /v1/identities/:id/timeline\n"
       << "GET    /v1/faces/:id/crop\n"
       << "\n"
@@ -1227,6 +1228,44 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       arr.push_back(j);
     }
     res.set_content(nlohmann::json{{"identity_id", id}, {"cooccurring", arr}}.dump(), "application/json");
+  });
+
+  svr.Get(R"(/v1/identities/(\d+)/cooccurring/(\d+))", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {
+    if (!auth(req, res)) return;
+    no_store(res);
+    const int64_t id = std::stoll(req.matches[1]);
+    const int64_t other = std::stoll(req.matches[2]);
+    if (!engine.gallery().identity(id, keyed(req)) || !engine.gallery().identity(other, keyed(req)))
+      return json_error(res, 404, "not found");
+    const uint64_t offset = param_u64(req, "offset", 0, UINT64_MAX);
+    const uint64_t limit = param_u64(req, "limit", 50, kMaxPageLimit);
+    uint64_t total = 0;
+    nlohmann::json arr = nlohmann::json::array();
+    for (auto& s : engine.gallery().shared_images(id, other, offset, limit, &total, keyed(req))) {
+      nlohmann::json j = {{"image_id", s.image_id}};
+      try {
+        auto im = engine.get_image(s.image_id);
+        j["sha256"] = to_hex(im.sha256);
+        j["width"] = im.width;
+        j["height"] = im.height;
+        j["created_at"] = im.created_at;
+      } catch (...) {
+      }
+      nlohmann::json mine = nlohmann::json::array(), theirs = nlohmann::json::array();
+      for (auto& f : s.faces) mine.push_back(face_json(f));
+      for (auto& f : s.other_faces) theirs.push_back(face_json(f));
+      j["faces"] = mine;
+      j["other_faces"] = theirs;
+      arr.push_back(j);
+    }
+    res.set_content(nlohmann::json{{"identity_id", id},
+                                   {"other_id", other},
+                                   {"images", arr},
+                                   {"total", total},
+                                   {"offset", offset},
+                                   {"limit", limit}}
+                        .dump(),
+                    "application/json");
   });
 
   svr.Get(R"(/v1/identities/(\d+)/timeline)", [&, auth, keyed, no_store](const httplib::Request& req, httplib::Response& res) {

@@ -236,6 +236,18 @@ TEST(HttpApi, IdentityRoutesEndToEnd) {
     auto co = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring", key)->body);
     ASSERT_EQ(co["cooccurring"].size(), 1u);
     EXPECT_EQ(co["cooccurring"][0]["size"], 4);
+    auto both = nlohmann::json::parse(
+        c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring/" + std::to_string(id_b), key)->body);
+    EXPECT_EQ(both["total"], 1);
+    ASSERT_EQ(both["images"].size(), 1u);
+    EXPECT_EQ(both["images"][0]["sha256"].get<std::string>().size(), 64u);
+    ASSERT_EQ(both["images"][0]["faces"].size(), 1u);
+    ASSERT_EQ(both["images"][0]["other_faces"].size(), 1u);
+    EXPECT_EQ(both["images"][0]["faces"][0]["identity_id"], id_a);
+    EXPECT_EQ(both["images"][0]["other_faces"][0]["identity_id"], id_b);
+    EXPECT_EQ(both["images"][0]["faces"][0]["bbox"].size(), 4u);
+    EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring/999", key)->status, 404);
+    EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring/" + std::to_string(id_b))->status, 401);
     auto tl = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/timeline?bucket=day", key)->body);
     EXPECT_EQ(tl["bucket_ms"], 86400000);
     ASSERT_GE(tl["buckets"].size(), 1u);
@@ -402,6 +414,7 @@ TEST(HttpApi, IdentityBrowsingIsOptIn) {
   EXPECT_EQ(nlohmann::json::parse(d->body)["size"], 3);
   EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/faces")->status, 200);
   EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/cooccurring")->status, 200);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/cooccurring/" + std::to_string(id))->status, 200);
   EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id) + "/timeline")->status, 200);
   EXPECT_EQ(c.Get("/v1/faces/0/crop?size=32")->status, 200);
   auto st = nlohmann::json::parse(c.Get("/v1/stats")->body);
@@ -425,7 +438,9 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   }
   ingest(engine, 30, {face_at(person_embedding(1, 9), 10, 10, 200), face_at(person_embedding(2, 9), 300, 300, 200)});
   ASSERT_TRUE(engine.recluster().has_value());
+  const int64_t id_a = engine.get_face(0).identity_id;
   const int64_t id_b = engine.get_face(1).identity_id;
+  ASSERT_GE(id_a, 0);
   ASSERT_GE(id_b, 0);
   LiveServer live(engine);
   auto c = live.client();
@@ -449,6 +464,9 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b))->status, 404);
   EXPECT_EQ(c.Get("/v1/faces/1")->status, 404);
   EXPECT_EQ(c.Get("/v1/faces/1/crop?size=32")->status, 404);
+  const std::string pair = "/v1/identities/" + std::to_string(id_a) + "/cooccurring/" + std::to_string(id_b);
+  EXPECT_EQ(c.Get(pair)->status, 404);
+  EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b) + "/cooccurring/" + std::to_string(id_a))->status, 404);
   httplib::Headers h;
   h.emplace("X-K", "10");
   h.emplace("X-Min-Score", "-1");
@@ -470,6 +488,9 @@ TEST(HttpApi, HidingRequiresTheIdentityKey) {
   // ... visible and flagged for the admin
   EXPECT_EQ(c.Get("/v1/identities/" + std::to_string(id_b), key)->status, 200);
   EXPECT_EQ(c.Get("/v1/faces/1/crop?size=32", key)->status, 200);
+  auto pair_admin = nlohmann::json::parse(c.Get(pair, key)->body);
+  ASSERT_EQ(pair_admin["images"].size(), 1u);
+  EXPECT_TRUE(pair_admin["images"][0]["other_faces"][0]["hidden"].get<bool>());
   httplib::Headers hk = h;
   hk.emplace("X-Identity-Key", "hush");
   auto qa = nlohmann::json::parse(c.Post("/v1/query/embedding", hk, raw_embedding(person_embedding(2, 0)), "application/octet-stream")->body);

@@ -478,6 +478,7 @@ queries accept `X-K` values up to 256.
 | `GET` | `/v1/identities/:id` | One person with cohesion and top co-occurring people |
 | `GET` | `/v1/identities/:id/faces?sort=score\|time&offset&limit` | Faces of a person with cosine to the centroid |
 | `GET` | `/v1/identities/:id/cooccurring?limit` | People who share photos with this one |
+| `GET` | `/v1/identities/:id/cooccurring/:other?offset&limit` | The photos two people share, newest first, with each one's faces |
 | `GET` | `/v1/identities/:id/timeline?bucket=hour\|day\|week` | Faces of a person per ingest bucket |
 | `POST` | `/v1/identities/cluster` | Run clustering now; returns the report (409 while running) |
 | `POST` | `/v1/identities/merge` | `{"ids": [..]}` — merge people; the result is pinned |
@@ -618,8 +619,8 @@ opt-in: start `hvaxd --identity-browse` to enable `GET /v1/identities`,
 `POST /v1/identities/cluster`, merge/split/rename/delete and
 `GET /v1/eval/impostor`, and to show the people grid on the landing page.
 Without the flag those routes return `403` and the page hides the grid, while
-`GET /v1/identities/:id` (plus `/faces`, `/cooccurring`, `/timeline`) and face
-crops stay available so a person reached from a search hit can still be opened.
+`GET /v1/identities/:id` (plus `/faces`, `/cooccurring`, `/cooccurring/:other`,
+`/timeline`) and face crops stay available so a person reached from a search hit can still be opened.
 `/v1/stats` reports the setting as `identity_browse`.
 
 ### Hiding people
@@ -633,7 +634,8 @@ and new faces that join it at ingest are hidden with it.
 
 For every other request a hidden person does not exist: their faces are dropped
 from face, template and people searches, `GET /v1/identities/:id` (and
-`/faces`, `/cooccurring`, `/timeline`) answers 404, `GET /v1/faces/:id` and the
+`/faces`, `/cooccurring`, `/timeline`, and `/cooccurring/:other` with them on
+either side) answers 404, `GET /v1/faces/:id` and the
 crop answer 404, and image metadata omits their faces. Requests carrying the
 key see hidden faces with `"hidden": true`. `/v1/stats` reports
 `identity_key_configured`, `identity_key_ok` for the presented key, and

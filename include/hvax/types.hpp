@@ -161,6 +161,13 @@ struct CooccurrenceEntry {
   uint32_t shared_images = 0;
 };
 
+// A photograph two identities appear in together, with each one's faces in it.
+struct SharedImage {
+  int64_t image_id = 0;
+  std::vector<FaceView> faces;        // the first identity's
+  std::vector<FaceView> other_faces;  // the second identity's
+};
+
 struct TimelineBucket {
   int64_t start_ms = 0;
   uint32_t faces = 0;
