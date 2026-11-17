@@ -1965,6 +1965,12 @@
       out.innerHTML = "<div class='out-h err'><strong>not an image</strong><span>" + esc(file.name) + "</span></div>";
       return;
     }
+    if (status === 422 && body && body.rejected === "too_small") {
+      out.innerHTML = "<div class='out-h err'><strong>too small</strong><span>" + esc(file.name) + " · " +
+        esc(body.width) + "×" + esc(body.height) + " · minimum " + esc(body.min_side) + "×" + esc(body.min_side) +
+        "</span></div>";
+      return;
+    }
     if (status < 200 || status >= 300) {
       out.innerHTML = "<div class='out-h err'><strong>error " + status + "</strong><span>" + esc(String(body).slice(0, 240)) + "</span></div>";
       return;

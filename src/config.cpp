@@ -29,6 +29,7 @@ void print_usage() {
       << "  --coreml-profile        log Core ML operator placement\n"
       << "  --http-threads N        default 8\n"
       << "  --max-pixels N          maximum decoded pixels, default 100000000\n"
+      << "  --min-image-side N      ingest refuses images with a side below N px, default 350; 0 = off\n"
       << "  --api-key STR           optional X-API-Key\n"
       << "  --dedup perceptual|sha256|off\n"
       << "  --phash-threshold N     default 10\n"
@@ -46,6 +47,8 @@ void print_usage() {
       << "  --cluster-interval S    recluster in the background every S seconds, default off\n"
       << "  --identity-browse       expose the people listing, curation and cluster trigger over HTTP\n"
       << "  --identity-key STR      key that may hide/unhide people (or $HVAX_IDENTITY_KEY)\n"
+      << "  --purge-small           report stored images below --min-image-side; exit\n"
+      << "  --purge-small --apply   delete those images, their faces and master files; exit\n"
       << "  --reindex               recompute quality flags, requantize int8, rebuild HNSW; exit\n"
       << "  --cluster               run identity clustering once; exit\n"
       << "  --eval-impostor [N]     print impostor-pair evaluation over up to N pairs; exit\n"
@@ -99,6 +102,9 @@ Config parse_args(int argc, char** argv) {
       c.inference.coreml_profile_compute_plan = true;
     } else if (eq(argv[i], "--http-threads")) c.http_threads = std::stoi(need("--http-threads"));
     else if (eq(argv[i], "--max-pixels")) c.max_pixels = std::stoll(need("--max-pixels"));
+    else if (eq(argv[i], "--min-image-side")) c.min_image_side = std::stoi(need("--min-image-side"));
+    else if (eq(argv[i], "--purge-small")) c.purge_small = true;
+    else if (eq(argv[i], "--apply")) c.purge_apply = true;
     else if (eq(argv[i], "--api-key")) c.api_key = need("--api-key");
     else if (eq(argv[i], "--phash-threshold")) c.phash_threshold = std::stoi(need("--phash-threshold"));
     else if (eq(argv[i], "--dhash-threshold")) c.dhash_threshold = std::stoi(need("--dhash-threshold"));
@@ -150,6 +156,10 @@ Config parse_args(int argc, char** argv) {
   if (c.inference.provider == InferenceProvider::coreml)
     c.inference.expected_concurrency = c.once_image.empty() ? std::min(3, c.http_threads) : 1;
   if (c.max_pixels <= 0) throw std::runtime_error("--max-pixels must be positive");
+  if (c.min_image_side < 0) throw std::runtime_error("--min-image-side must be non-negative");
+  if (c.purge_apply && !c.purge_small) throw std::runtime_error("--apply is only valid with --purge-small");
+  if (c.purge_small && c.min_image_side == 0)
+    throw std::runtime_error("--purge-small needs a positive --min-image-side");
   return c;
 }
 

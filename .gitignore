@@ -8,5 +8,9 @@ compile_commands.json
 hvax.lock
 extension/node_modules/
 extension/dist/
+extension/dist-safari/
+extension/safari/build/
+extension/safari/*.xcodeproj/project.xcworkspace/
+extension/safari/*.xcodeproj/xcuserdata/
 third_party/onnxruntime-linux-x64-gpu-*/
 third_party/onnxruntime-osx-arm64-*/

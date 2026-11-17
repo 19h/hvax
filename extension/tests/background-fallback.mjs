@@ -52,7 +52,8 @@ globalThis.fetch = async (input, init = {}) => {
   throw new Error(`unexpected fetch ${url}`);
 };
 
-await import(`../dist/background.js?fallback-test=${Date.now()}`);
+const dist = process.argv[2] ?? "dist";
+await import(`../${dist}/background.js?fallback-test=${Date.now()}`);
 assert.equal(typeof messageListener, "function");
 
 messageListener(

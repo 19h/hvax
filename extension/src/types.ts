@@ -8,6 +8,7 @@ export type Settings = {
   captureBackgrounds: boolean;
   maxBytes: number;
   skipSvg: boolean;
+  skipBackendImages: boolean;
 };
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -20,6 +21,7 @@ export const DEFAULT_SETTINGS: Settings = {
   captureBackgrounds: true,
   maxBytes: 20 * 1024 * 1024,
   skipSvg: true,
+  skipBackendImages: true,
 };
 
 export type Stats = {
@@ -46,6 +48,15 @@ export const EMPTY_STATS: Stats = {
   known: 0,
   lastError: "",
   lastStatus: "",
+};
+
+/** Body of the gallery's 422 for an image below its --min-image-side. */
+export type IngestRejection = {
+  rejected?: string;
+  error?: string;
+  width?: number;
+  height?: number;
+  min_side?: number;
 };
 
 export type IngestUrlMessage = {

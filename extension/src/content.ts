@@ -1,3 +1,4 @@
+import { isBackendImage } from "./api";
 import {
   DEFAULT_SETTINGS,
   type CaptureImageMessage,
@@ -49,7 +50,8 @@ contentGlobal[instanceKey] = { stop: shutdown };
 
 function normalizeUrl(raw: string): string {
   const t = raw.trim().replace(/^url\((['"]?)(.*)\1\)$/, "$2");
-  if (!t || t === "none" || t.startsWith("chrome-extension://") || t.startsWith("about:")) return "";
+  // chrome-extension://, safari-web-extension://, ...
+  if (!t || t === "none" || /^[a-z-]+-extension:/i.test(t) || t.startsWith("about:")) return "";
   try {
     return new URL(t, document.baseURI).href;
   } catch {
@@ -149,24 +151,15 @@ function findImage(url: string): HTMLImageElement | undefined {
   return visit(document);
 }
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error("failed to encode image"));
-    reader.onload = () => {
-      if (typeof reader.result !== "string") {
-        reject(new Error("failed to encode image"));
-        return;
-      }
-      const comma = reader.result.indexOf(",");
-      if (comma < 0) {
-        reject(new Error("invalid image data URL"));
-        return;
-      }
-      resolve(reader.result.slice(comma + 1));
-    };
-    reader.readAsDataURL(blob);
-  });
+// Not FileReader: Safari removes it from pages when Lockdown Mode is on.
+async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  // Chunked so String.fromCharCode never gets more arguments than the engine allows.
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
 }
 
 async function captureImage(url: string): Promise<CaptureImageResponse> {
@@ -260,6 +253,7 @@ async function sendBytes(url: string, width: number, height: number, image?: HTM
 }
 
 function dispatch(url: string, width: number, height: number, image?: HTMLImageElement): void {
+  if (settings.skipBackendImages && isBackendImage(url, settings)) return;
   if (already(url)) return;
   if (settings.skipSvg && looksSvg(url)) return;
   if (width > 0 && height > 0 && (width < settings.minWidth || height < settings.minHeight)) return;

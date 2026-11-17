@@ -78,6 +78,7 @@ TEST(ProcessedIngest, StoresAndDeduplicatesWithoutLoadingModels) {
   hvax::Config config;
   config.data_dir = dir.string();
   config.models_dir = (dir / "models-do-not-exist").string();
+  config.min_image_side = 0;  // the 96 px fixture is below the default limit
   config.dedup = hvax::DedupMode::sha256;
   hvax::Engine engine(config);
 
@@ -109,6 +110,7 @@ TEST(ProcessedIngest, TemplateFaceIdsBecomeReferencesAndExclusions) {
   hvax::Config config;
   config.data_dir = dir.string();
   config.models_dir = (dir / "models-do-not-exist").string();
+  config.min_image_side = 0;  // the 96 px fixture is below the default limit
   config.dedup = hvax::DedupMode::sha256;
   hvax::Engine engine(config);
 
@@ -141,6 +143,7 @@ TEST(ProcessedIngest, PreflightSkipsOnlySafeDuplicates) {
   hvax::Config config;
   config.data_dir = dir.string();
   config.models_dir = (dir / "models-do-not-exist").string();
+  config.min_image_side = 0;  // the 96 px fixture is below the default limit
   config.dedup = hvax::DedupMode::perceptual;
   hvax::Engine engine(config);
 
@@ -173,6 +176,51 @@ TEST(ProcessedIngest, PreflightSkipsOnlySafeDuplicates) {
   const auto unknown = engine.check_ingest(different_sha, ~perceptual.phash, ~perceptual.dhash, image.cols, image.rows);
   EXPECT_FALSE(unknown.duplicate);
   EXPECT_TRUE(unknown.process_required);
+
+  std::filesystem::remove_all(dir);
+}
+
+TEST(ProcessedIngest, RefusesImagesBelowTheMinimumSide) {
+  EXPECT_EQ(hvax::Config{}.min_image_side, 350);
+  const auto dir = processed_tmpdir();
+  hvax::Config config;
+  config.data_dir = dir.string();
+  config.models_dir = (dir / "models-do-not-exist").string();
+  config.dedup = hvax::DedupMode::sha256;
+  hvax::Engine engine(config);
+
+  auto submit = [&](int width, int height) {
+    cv::Mat image(height, width, CV_8UC3, cv::Scalar(width % 255, height % 255, 160));
+    std::vector<uint8_t> bytes;
+    cv::imencode(".jpg", image, bytes);
+    return engine.ingest_processed(bytes, image, {processed_face()});
+  };
+
+  // Either side below the limit is enough, however large the other one is.
+  for (const auto& [width, height] : {std::pair{349, 349}, {349, 2000}, {2000, 349}, {96, 96}}) {
+    const auto refused = submit(width, height);
+    EXPECT_EQ(refused.status, hvax::IngestStatus::too_small) << width << "x" << height;
+    EXPECT_EQ(refused.width, width);
+    EXPECT_EQ(refused.height, height);
+    EXPECT_EQ(refused.image_id, 0);
+  }
+  EXPECT_EQ(engine.gallery().live_images(), 0u);
+  EXPECT_EQ(engine.metrics().ingest_too_small.load(), 4u);
+
+  EXPECT_EQ(submit(350, 350).status, hvax::IngestStatus::stored);
+  EXPECT_EQ(submit(351, 400).status, hvax::IngestStatus::stored);
+  EXPECT_EQ(engine.gallery().live_images(), 2u);
+  EXPECT_EQ(engine.gallery().undersized_images(config.min_image_side), 0u);
+
+  // The preflight gives the same verdict before the client runs inference.
+  std::array<uint8_t, 32> sha{};
+  const auto small = engine.check_ingest(sha, 1, 2, 349, 350);
+  EXPECT_EQ(small.rejected, "too_small");
+  EXPECT_FALSE(small.process_required);
+  EXPECT_FALSE(small.duplicate);
+  const auto fine = engine.check_ingest(sha, 1, 2, 350, 350);
+  EXPECT_TRUE(fine.rejected.empty());
+  EXPECT_TRUE(fine.process_required);
 
   std::filesystem::remove_all(dir);
 }

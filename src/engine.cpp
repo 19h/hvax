@@ -292,6 +292,15 @@ IngestResult Engine::persist_ingest(std::span<const uint8_t> bytes, const cv::Ma
   return r;
 }
 
+IngestResult Engine::reject_too_small(int width, int height) {
+  IngestResult r;
+  r.status = IngestStatus::too_small;
+  r.width = width;
+  r.height = height;
+  metrics_.ingest_too_small.fetch_add(1, std::memory_order_relaxed);
+  return r;
+}
+
 IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
   metrics_.ingest_total.fetch_add(1, std::memory_order_relaxed);
   IngestResult r;
@@ -301,6 +310,9 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
   }
   const auto sha = sha256_bytes(bytes);
   if (auto hit = gallery_->find_by_sha(sha)) {
+    // A copy stored before the size limit existed does not make the image
+    // acceptable: the verdict must not depend on whether a purge has run.
+    if (too_small(hit->width, hit->height)) return reject_too_small(hit->width, hit->height);
     r.status = IngestStatus::duplicate;
     r.duplicate = true;
     r.duplicate_kind = "sha256";
@@ -317,6 +329,7 @@ IngestResult Engine::ingest(std::span<const uint8_t> bytes) {
     r.status = IngestStatus::bad_image;
     return r;
   }
+  if (too_small(img.cols, img.rows)) return reject_too_small(img.cols, img.rows);
   auto faces = run_pipeline(img);
   return persist_ingest(bytes, img, faces);
 }
@@ -329,12 +342,20 @@ IngestResult Engine::ingest_processed(std::span<const uint8_t> bytes, const cv::
     r.status = IngestStatus::bad_image;
     return r;
   }
+  if (too_small(bgr.cols, bgr.rows)) return reject_too_small(bgr.cols, bgr.rows);
   return persist_ingest(bytes, bgr, faces);
 }
 
 IngestCheckResult Engine::check_ingest(const std::array<uint8_t, 32>& sha, uint64_t phash, uint64_t dhash, int width,
                                        int height) const {
   IngestCheckResult result;
+  if (too_small(width, height)) {
+    result.process_required = false;
+    result.rejected = "too_small";
+    result.width = width;
+    result.height = height;
+    return result;
+  }
   auto duplicate = gallery_->find_by_sha(sha);
   if (duplicate) {
     result.duplicate = true;
@@ -541,6 +562,7 @@ std::string Engine::prometheus() const {
   std::ostringstream o;
   o << "hvax_ingest_total " << metrics_.ingest_total.load() << "\n";
   o << "hvax_ingest_ignored_total " << metrics_.ingest_ignored.load() << "\n";
+  o << "hvax_ingest_rejected_total{reason=\"too_small\"} " << metrics_.ingest_too_small.load() << "\n";
   o << "hvax_ingest_duplicate_total{kind=\"sha256\"} " << metrics_.ingest_dup_sha.load() << "\n";
   o << "hvax_ingest_duplicate_total{kind=\"perceptual\"} " << metrics_.ingest_dup_phash.load() << "\n";
   o << "hvax_master_replace_total " << metrics_.master_replace.load() << "\n";
@@ -555,6 +577,7 @@ std::string Engine::prometheus() const {
   o << "hvax_faces_low_quality " << gallery_->low_quality_faces() << "\n";
   o << "hvax_faces_unassigned " << gallery_->unassigned_faces() << "\n";
   o << "hvax_images " << gallery_->live_images() << "\n";
+  o << "hvax_images_undersized " << gallery_->undersized_images(cfg_.min_image_side) << "\n";
   o << "hvax_identities " << gallery_->identity_count() << "\n";
   o << "hvax_identities_hidden " << gallery_->hidden_identity_count() << "\n";
   o << "hvax_identity_largest " << gallery_->largest_identity() << "\n";

@@ -13,6 +13,7 @@ const fields = {
   maxBytesMb: document.querySelector<HTMLInputElement>("#maxBytesMb")!,
   captureBackgrounds: document.querySelector<HTMLInputElement>("#captureBackgrounds")!,
   skipSvg: document.querySelector<HTMLInputElement>("#skipSvg")!,
+  skipBackendImages: document.querySelector<HTMLInputElement>("#skipBackendImages")!,
 };
 
 async function load(): Promise<void> {
@@ -26,6 +27,7 @@ async function load(): Promise<void> {
   fields.maxBytesMb.value = String(Math.round(s.maxBytes / (1024 * 1024)));
   fields.captureBackgrounds.checked = s.captureBackgrounds;
   fields.skipSvg.checked = s.skipSvg;
+  fields.skipBackendImages.checked = s.skipBackendImages;
 }
 
 form.addEventListener("submit", (ev) => {
@@ -41,6 +43,7 @@ form.addEventListener("submit", (ev) => {
     maxBytes: maxMb * 1024 * 1024,
     captureBackgrounds: fields.captureBackgrounds.checked,
     skipSvg: fields.skipSvg.checked,
+    skipBackendImages: fields.skipBackendImages.checked,
   };
   void chrome.storage.sync.set(next).then(() => {
     saved.textContent = "saved";

@@ -23,9 +23,11 @@ BENCH_WARMUP ?= 10
 ASAN_BUILD_DIR ?= $(CURDIR)/build-asan
 DEBUG_BUILD_DIR ?= $(CURDIR)/build-debug
 RELEASE_BUILD_DIR ?= $(CURDIR)/build-release
+SAFARI_TEAM ?=
 
 .PHONY: all setup bootstrap deps check-tools runtime models configure build test check \
-        verify rebuild debug release asan run once bench extension clean distclean help
+        verify rebuild debug release asan run once bench extension safari-extension \
+        clean distclean help
 
 all: build
 
@@ -174,6 +176,16 @@ extension:
 	@npm --prefix extension run typecheck
 	@npm --prefix extension run build
 
+## Build the Safari version of the extension as a macOS app (needs Xcode).
+## Signs to run locally unless SAFARI_TEAM names an Apple developer team.
+safari-extension:
+	@command -v npm >/dev/null 2>&1 || { echo "missing required tool: npm" >&2; exit 2; }
+	@command -v xcodebuild >/dev/null 2>&1 || { echo "missing required tool: xcodebuild" >&2; exit 2; }
+	@npm --prefix extension ci
+	@npm --prefix extension run typecheck
+	@npm --prefix extension run safari -- $(if $(SAFARI_TEAM),DEVELOPMENT_TEAM=$(SAFARI_TEAM) CODE_SIGN_IDENTITY="Apple Development")
+	@echo "built: extension/safari/build/Build/Products/Release/hvax ingest.app"
+
 ## Remove compiled files while retaining the configured build tree.
 clean:
 	@target="$(abspath $(BUILD_DIR))"; \
@@ -215,9 +227,10 @@ help:
 	@echo "  make once IMAGE=FILE     process one image"
 	@echo "  make bench IMAGE=FILE    run CPU inference benchmark"
 	@echo "  make extension           install and build extension dependencies"
+	@echo "  make safari-extension    build the Safari extension app (macOS, Xcode)"
 	@echo "  make clean|distclean     clean outputs or remove the build tree"
 	@echo
 	@echo "Variables: BUILD_DIR, BUILD_TYPE, BUILD_TESTS, MARCH_NATIVE, JOBS,"
 	@echo "           GENERATOR, CMAKE_ARGS, MODELS_DIR, DATA_DIR, RUN_ARGS,"
-	@echo "           IMAGE, BENCH_RUNS, BENCH_WARMUP"
+	@echo "           IMAGE, BENCH_RUNS, BENCH_WARMUP, SAFARI_TEAM"
 	@echo 'Example: make run RUN_ARGS="--coreml --coreml-profile"'

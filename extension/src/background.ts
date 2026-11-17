@@ -1,9 +1,10 @@
-import { resolveApiUrl } from "./api";
+import { isBackendImage, resolveApiUrl } from "./api";
 import { bumpStats, loadSettings, loadStats, saveStats } from "./settings";
 import {
   EMPTY_STATS,
   type CaptureImageResponse,
   type ExtMessage,
+  type IngestRejection,
   type IngestResponse,
   type ServerStats,
   type Settings,
@@ -23,6 +24,16 @@ let jobsAt = 0;
 let jobsKey = "";
 let jobsGeneration = 0;
 let jobsRefresh: Promise<void> | null = null;
+
+// Smallest image side the gallery stores, learned from its first refusal so
+// later images known to be smaller are not fetched and uploaded at all.
+let serverMinSide = 0;
+let serverMinSideKey = "";
+
+function belowServerMinimum(settings: Settings, width: number, height: number): boolean {
+  if (serverMinSide <= 0 || serverMinSideKey !== ingestKey(settings)) return false;
+  return width > 0 && height > 0 && (width < serverMinSide || height < serverMinSide);
+}
 
 function enqueue(task: () => Promise<void>): void {
   pending += 1;
@@ -220,6 +231,27 @@ async function postBody(body: ArrayBuffer, mime: string, sourceUrl: string): Pro
     } catch {
       await bumpStats({ stored: 1, lastStatus: "stored", lastError: "" });
     }
+  } else if (res.status === 422) {
+    let verdict: IngestRejection | null = null;
+    try {
+      verdict = (await res.json()) as IngestRejection;
+    } catch {
+      // Not JSON: reported as a plain 422 below.
+    }
+    if (verdict?.rejected === "too_small") {
+      // The gallery's size limit, not a failure.
+      if (typeof verdict.min_side === "number" && verdict.min_side > 0) {
+        serverMinSide = verdict.min_side;
+        serverMinSideKey = ingestKey(settings);
+      }
+      await bumpStats({
+        ignored: 1,
+        lastStatus: `too small ${verdict.width ?? "?"}x${verdict.height ?? "?"} (min ${verdict.min_side ?? "?"})`,
+        lastError: "",
+      });
+    } else {
+      await bumpStats({ errors: 1, lastStatus: "422", lastError: verdict?.error || "HTTP 422" });
+    }
   } else if (res.status === 415 || res.status === 400) {
     await bumpStats({
       errors: 1,
@@ -251,7 +283,10 @@ async function ingestUrl(
   sender: chrome.runtime.MessageSender,
 ): Promise<void> {
   const settings = await loadSettings();
+  if (!settings.enabled) return;
+  if (settings.skipBackendImages && isBackendImage(url, settings)) return;
   if (width > 0 && height > 0 && (width < settings.minWidth || height < settings.minHeight)) return;
+  if (belowServerMinimum(settings, width, height)) return;
   if (inFlight.has(url) || posted.has(url)) return;
   inFlight.add(url);
   try {
@@ -295,11 +330,21 @@ function decodeBase64(data: string): ArrayBuffer {
   return bytes.buffer;
 }
 
-async function ingestBytes(sourceUrl: string, mime: string, dataBase64: string): Promise<void> {
+async function ingestBytes(
+  sourceUrl: string,
+  mime: string,
+  dataBase64: string,
+  width: number,
+  height: number,
+): Promise<void> {
   if (inFlight.has(sourceUrl) || posted.has(sourceUrl)) return;
   inFlight.add(sourceUrl);
   try {
-    await ensureJobs(await loadSettings());
+    const settings = await loadSettings();
+    if (!settings.enabled) return;
+    if (settings.skipBackendImages && isBackendImage(sourceUrl, settings)) return;
+    if (belowServerMinimum(settings, width, height)) return;
+    await ensureJobs(settings);
     await acquire();
     try {
       const bytes = decodeBase64(dataBase64);
@@ -343,7 +388,7 @@ chrome.runtime.onMessage.addListener((raw: ExtMessage, sender, sendResponse) => 
     return false;
   }
   if (raw.type === "ingest-bytes") {
-    enqueue(() => ingestBytes(raw.sourceUrl, raw.mime, raw.dataBase64));
+    enqueue(() => ingestBytes(raw.sourceUrl, raw.mime, raw.dataBase64, raw.width, raw.height));
     return false;
   }
   return false;

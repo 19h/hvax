@@ -34,6 +34,13 @@ inline constexpr float kIdentityMergeCosine = 0.70f;  // clusters merged by cent
 inline constexpr int kClusterNeighbors = 50;
 inline constexpr int kDefaultIndexMinFacePx = 24;
 inline constexpr float kDefaultIndexMinDet = 0.65f;
+// Photographs with either side below this are refused at ingest
+// (--min-image-side). `hvaxd --purge-small` removes the ones stored earlier.
+inline constexpr int kDefaultMinImageSide = 350;
+
+inline bool image_too_small(int64_t width, int64_t height, int min_side) {
+  return min_side > 0 && (width < min_side || height < min_side);
+}
 
 // int8 embeddings are round(f32 * kI8Scale) clamped to [-127, 127]. The
 // largest component seen in 1.1M ArcFace vectors is 0.26, so 480 uses the
@@ -53,6 +60,7 @@ enum class IngestStatus {
   upgraded,
   ignored_no_face,
   bad_image,
+  too_small,  // below Config::min_image_side; width/height are still reported
 };
 
 struct BBox {
@@ -196,6 +204,8 @@ struct IngestCheckResult {
   bool duplicate = false;
   bool process_required = true;
   std::string duplicate_kind;
+  // Non-empty when the gallery would refuse the image outright ("too_small").
+  std::string rejected;
   int64_t image_id = 0;
   int width = 0;
   int height = 0;

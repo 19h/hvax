@@ -33,7 +33,7 @@ Python runtime or database required.
 - Validated processed-ingest API for using the server as storage only
 - Parallel CLI with recursive directory scanning and optional CUDA or CoreML
   inference
-- Optional Chrome extension for ingesting images seen while browsing
+- Optional Chrome and Safari extension for ingesting images seen while browsing
 
 ## How it works
 
@@ -176,7 +176,9 @@ face:
 }
 ```
 
-No-face images return `204 No Content` and are not stored.
+No-face images return `204 No Content` and are not stored. Images with either
+side below `--min-image-side` (350 px) are refused with `422` before inference;
+see [Minimum image size](#minimum-image-size).
 
 ## Process locally, store remotely
 
@@ -194,14 +196,16 @@ gallery:
 
 Directory inputs are recursive by default. `--jobs` controls concurrent decode,
 inference, and upload work; `--no-recursive` limits directory inputs to one
-level. The command prints one result per file and a stored/duplicate/no-face/error
-summary. `HVAX_SERVER` and `HVAX_API_KEY` may be used instead of their flags.
+level. The command prints one result per file and a
+stored/duplicate/no-face/too-small/error summary. `HVAX_SERVER` and `HVAX_API_KEY` may be used instead of their flags.
 
 Before running face detection, the CLI sends the image's SHA-256, pHash, dHash,
 and dimensions to `/v1/ingest/check`. Exact duplicates and strong perceptual
 duplicates whose existing master is at least as large skip inference and upload.
 Potential higher-resolution upgrades and borderline perceptual matches are still
 processed so the server can apply embedding confirmation and master replacement.
+Images below the gallery's minimum size are reported as `too-small` at the same
+step and are neither processed nor uploaded.
 Model loading is lazy, so a scan containing only known images never initializes
 ONNX Runtime.
 
@@ -248,6 +252,25 @@ gallery. `GET /v1/stats` proxies the remote gallery's authoritative counts and
 adds the same `jobs` field. The Chrome extension reads `jobs` from the ingest
 target and sends that many concurrent POSTs. It binds only to loopback by
 default; do not expose it to untrusted networks.
+
+`hvax ingest` can scan files through the same processor instead of loading the
+models itself:
+
+```bash
+./build/hvax ingest --processor http://127.0.0.1:8080 ~/Pictures
+```
+
+With `--processor`, the CLI only reads and hashes each file and posts the raw
+bytes to the processor's `/v1/ingest`; preflight, inference, and the upload
+happen in the `hvax serve` process, with its gallery and its API key. The
+gallery is read from the processor's `/health`, so `--server` is not needed, and
+a `--server` or `HVAX_SERVER` naming a different gallery is an error. `--jobs`
+defaults to the processor's `jobs`. Model and inference options such as
+`--models-dir`, `--coreml`, or `--det-size` belong on `hvax serve` and are
+rejected here. The upload cache still applies and is shared with direct ingest
+to the same gallery; the processor keeps the inference cache. An upload that
+stalls in transit is retried on a fresh connection, up to three attempts, before
+the file is reported as an error.
 
 ### CUDA client build
 
@@ -577,7 +600,7 @@ Common response statuses:
 | `404` | Image or face ID does not exist |
 | `413` | The submitted image or processed payload is too large |
 | `415` | Ingest body could not be decoded as an image |
-| `422` | A processed-ingest payload or template reference failed validation |
+| `422` | A processed-ingest payload or template reference failed validation, or the image is below the minimum size (`"rejected": "too_small"`) |
 
 ### Authentication and exposure
 
@@ -663,6 +686,40 @@ detector score scaled by how far the crop had to be upsampled to reach the
 for new faces immediately; run `hvaxd --reindex` to apply it to stored faces
 (it also requantises int8 and rebuilds the HNSW).
 
+### Minimum image size
+
+Ingest refuses images whose width or height is below `--min-image-side`
+(350 px; `0` accepts any size). This applies to `/v1/ingest`,
+`/v1/ingest/processed` and PDF pages; queries may still use a probe of any
+size. The refusal comes before face detection:
+
+```json
+{"error": "image is smaller than 350x350", "rejected": "too_small",
+ "width": 300, "height": 200, "min_side": 350}
+```
+
+`/v1/ingest/check` answers `200` with `"process_required": false` and the same
+`rejected`, `width`, `height` and `min_side` fields, so clients skip inference
+and upload. A refusal does not depend on whether a copy of the image is already
+stored.
+
+Images stored before the limit existed, or while it was lower, stay until they
+are purged. `/v1/stats` reports how many there are as `undersized_images`
+(`hvax_images_undersized` in `/metrics`). To remove them, stop the daemon and
+run the purge against the same data directory:
+
+```bash
+hvaxd --data-dir ./data --purge-small           # report only, changes nothing
+hvaxd --data-dir ./data --purge-small --apply   # delete
+```
+
+Both print a JSON report: `images`, `faces` and master-file `bytes` affected,
+and how many identities lose a face (`identities_touched`) or all of them
+(`identities_emptied`). `--apply` tombstones the images and faces, deletes the
+master files, takes the faces out of the HNSW and recomputes the identities
+they belonged to; an identity left without faces is dissolved. It cannot be
+undone. `--min-image-side N` selects a different limit for the purge.
+
 ### Thresholds
 
 The defaults were measured on a 1.1M-face gallery embedded with `buffalo_l`:
@@ -723,6 +780,7 @@ risk of false positives.
 --coreml-profile        log Core ML operator placement       (default: off)
 --http-threads N        HTTP worker threads                  (default: 8)
 --api-key STRING        require X-API-Key on /v1/*           (default: disabled)
+--min-image-side N      refuse ingest below N px on a side   (default: 350, 0 = off)
 --dedup MODE            perceptual, sha256, or off           (default: perceptual)
 --phash-threshold N     pHash Hamming-distance threshold     (default: 10)
 --dhash-threshold N     dHash Hamming-distance threshold     (default: 12)
@@ -738,6 +796,8 @@ risk of false positives.
 --cluster-interval S    recluster in the background every S s (default: off)
 --identity-browse       expose people listing, curation, cluster trigger (default: off)
 --identity-key STR      key allowed to hide/unhide people ($HVAX_IDENTITY_KEY)
+--purge-small           report stored images below --min-image-side; exit
+--purge-small --apply   delete them with their faces and master files; exit
 --reindex               recompute flags, requantise, rebuild HNSW; exit
 --cluster               run identity clustering once; exit
 --eval-impostor [N]     impostor evaluation over up to N pairs; exit
@@ -804,12 +864,18 @@ npm run build
 
 In `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and
 select `extension/dist`. Configure the endpoint, API key, minimum image size,
-and CSS-background capture from the popup or options page.
+CSS-background capture, and whether images served by the gallery itself are
+skipped (on by default, so browsing hv.ax never re-indexes its own images)
+from the popup or options page.
 
 The extension requests access to all HTTP and HTTPS pages and can transmit the
 images displayed on those pages to your configured hvax server. Review its
 permissions and use it only in browsing contexts where that collection is
 appropriate. See [extension/README.md](extension/README.md) for details.
+
+The same extension also builds as a native Safari app on macOS with
+`make safari-extension` (requires Xcode); see
+[extension/README.md](extension/README.md#safari-macos).
 
 ## Development
 

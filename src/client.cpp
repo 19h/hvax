@@ -35,6 +35,8 @@ struct Options {
   std::string command;
   std::string server = "http://127.0.0.1:8080";
   bool server_set = false;
+  std::string processor;
+  std::string local_only_flag;
   std::string api_key;
   std::string bind = "127.0.0.1";
   int port = 8080;
@@ -60,16 +62,30 @@ struct Endpoint {
   std::string stats_path;
 };
 
+struct Processor {
+  std::string origin;
+  std::string ingest_path;
+  std::string health_path;
+  std::string gallery;
+  int jobs = 0;
+};
+
 struct Counters {
   std::atomic<uint64_t> completed{0};
   std::atomic<uint64_t> cached{0};
   std::atomic<uint64_t> stored{0};
   std::atomic<uint64_t> duplicate{0};
   std::atomic<uint64_t> no_face{0};
+  std::atomic<uint64_t> too_small{0};
   std::atomic<uint64_t> errors{0};
 };
 
 class PipelineInitializationError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
+class ProcessorError : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
 };
@@ -245,6 +261,8 @@ void usage() {
             << "  --server URL           remote gallery URL (required by serve; ingest default "
                "http://127.0.0.1:8080)\n"
             << "  --api-key KEY          X-API-Key value (or HVAX_API_KEY)\n"
+            << "  --processor URL        ingest: send images to an 'hvax serve' processor instead of\n"
+            << "                         running the models here; it forwards to its own gallery\n"
             << "  --models-dir DIR       det_10g.onnx + w600k_r50.onnx (default "
                "./models)\n"
             << "  --cuda                 use ONNX Runtime CUDAExecutionProvider\n"
@@ -277,7 +295,11 @@ const char* need_value(int& index, int argc, char** argv, const char* name) {
 
 Options parse_options(int argc, char** argv) {
   Options out;
+  auto local_only = [&](std::string_view flag) {
+    if (out.local_only_flag.empty()) out.local_only_flag = flag;
+  };
   auto set_provider = [&](hvax::InferenceProvider provider, std::string_view flag) {
+    local_only(flag);
     if (out.inference.provider != hvax::InferenceProvider::cpu && out.inference.provider != provider)
       throw std::runtime_error(std::string(flag) + " conflicts with another execution provider");
     out.inference.provider = provider;
@@ -306,7 +328,11 @@ Options parse_options(int argc, char** argv) {
       out.server_set = true;
     } else if (arg == "--api-key") {
       out.api_key = need_value(i, argc, argv, "--api-key");
+    } else if (arg == "--processor") {
+      out.processor = need_value(i, argc, argv, "--processor");
+      if (out.processor.empty()) throw std::runtime_error("--processor requires a URL");
     } else if (arg == "--models-dir") {
+      local_only(arg);
       out.models_dir = need_value(i, argc, argv, "--models-dir");
     } else if (arg == "--cuda") {
       set_provider(hvax::InferenceProvider::cuda, arg);
@@ -343,14 +369,17 @@ Options parse_options(int argc, char** argv) {
     } else if (arg == "--port") {
       out.port = std::stoi(need_value(i, argc, argv, "--port"));
     } else if (arg == "--threads") {
+      local_only(arg);
       out.inference.intra_threads = std::stoi(need_value(i, argc, argv, "--threads"));
     } else if (arg == "--det-size") {
+      local_only(arg);
       out.det_size = std::stoi(need_value(i, argc, argv, "--det-size"));
     } else if (arg == "--no-recursive") {
       out.recursive = false;
     } else if (arg == "--max-bytes-mib") {
       out.max_bytes = static_cast<size_t>(std::stoull(need_value(i, argc, argv, "--max-bytes-mib"))) * 1024 * 1024;
     } else if (arg == "--max-pixels") {
+      local_only(arg);
       out.max_pixels = std::stoll(need_value(i, argc, argv, "--max-pixels"));
     } else if (arg == "--cache-dir") {
       out.cache_dir = need_value(i, argc, argv, "--cache-dir");
@@ -368,6 +397,12 @@ Options parse_options(int argc, char** argv) {
   if (out.command == "serve" && !out.inputs.empty()) throw std::runtime_error("serve does not accept file inputs");
   if (out.command == "serve" && !out.server_set)
     throw std::runtime_error("serve requires a remote --server URL (or HVAX_SERVER)");
+  if (!out.processor.empty()) {
+    if (out.command != "ingest") throw std::runtime_error("--processor applies only to ingest");
+    if (!out.local_only_flag.empty())
+      throw std::runtime_error(out.local_only_flag +
+                               " has no effect with --processor; set it on the 'hvax serve' process instead");
+  }
   if (out.jobs <= 0 || out.inference.intra_threads <= 0 || out.det_size <= 0 || out.max_bytes == 0 || out.max_pixels <= 0)
     throw std::runtime_error("numeric options must be positive");
   if (out.det_size % 32 != 0) throw std::runtime_error("--det-size must be a multiple of 32");
@@ -410,6 +445,24 @@ Endpoint parse_endpoint(std::string value) {
     endpoint.stats_path = base + "/v1/stats";
   }
   return endpoint;
+}
+
+Processor parse_processor(std::string value) {
+  if (value.find("://") == std::string::npos) value = "http://" + value;
+  if (!value.starts_with("http://") && !value.starts_with("https://"))
+    throw std::runtime_error("processor URL must use http or https");
+  const size_t path_pos = value.find('/', value.find("://") + 3);
+  Processor processor;
+  processor.origin = path_pos == std::string::npos ? value : value.substr(0, path_pos);
+  std::string base = path_pos == std::string::npos ? "" : value.substr(path_pos);
+  if (base.find('?') != std::string::npos || base.find('#') != std::string::npos)
+    throw std::runtime_error("processor URL must not contain a query or fragment");
+  while (!base.empty() && base.back() == '/') base.pop_back();
+  constexpr std::string_view ingest = "/v1/ingest";
+  if (base.ends_with(ingest)) base.resize(base.size() - ingest.size());
+  processor.ingest_path = base + std::string(ingest);
+  processor.health_path = base + "/health";
+  return processor;
 }
 
 bool image_extension(const fs::path& path) {
@@ -498,6 +551,19 @@ void configure_client(httplib::Client& client) {
   client.set_write_timeout(std::chrono::minutes(5));
 }
 
+// An image body written to a fresh connection can stall on macOS behind a
+// network content filter: the bytes never reach TCP and the processor gives up
+// on the request. Small writes, a warm-up request, a short write timeout, and
+// a retry keep one stuck flow from hanging or failing the scan.
+constexpr size_t kProcessorWriteBytes = 16 * 1024;
+constexpr int kProcessorAttempts = 3;
+
+void configure_processor_client(httplib::Client& client) {
+  configure_client(client);
+  // Each write is small, so one that cannot finish in this time is stuck.
+  client.set_write_timeout(std::chrono::seconds(30));
+}
+
 struct PreflightOutcome {
   bool process_required = true;
   nlohmann::json response;
@@ -525,6 +591,15 @@ PreflightOutcome preflight(httplib::Client& client, const Endpoint& endpoint, co
   outcome.response = nlohmann::json::parse(check->body);
   outcome.process_required = outcome.response.value("process_required", true);
   return outcome;
+}
+
+// The gallery refuses images below its --min-image-side: the preflight says so
+// with `rejected`, and an upload gets the same body as a 422. Not cached, so a
+// gallery whose limit is lowered later sees the file again.
+std::optional<std::string> too_small_detail(const nlohmann::json& body) {
+  if (!body.is_object() || body.value("rejected", "") != "too_small") return std::nullopt;
+  return std::to_string(body.value("width", 0)) + "x" + std::to_string(body.value("height", 0)) +
+         " min=" + std::to_string(body.value("min_side", 0));
 }
 
 struct UploadOutcome {
@@ -558,6 +633,18 @@ void print_line(std::mutex& mutex, const fs::path& path, const std::string& stat
   std::cout << '\n';
 }
 
+void report_ingested(const fs::path& path, const nlohmann::json& result, const std::string& suffix,
+                     Counters& counters, std::mutex& output_mu) {
+  const bool duplicate = result.value("duplicate", false);
+  const bool upgraded = result.value("master_replaced", false);
+  if (duplicate)
+    counters.duplicate.fetch_add(1);
+  else
+    counters.stored.fetch_add(1);
+  const std::string status = upgraded ? "upgraded" : (duplicate ? "duplicate" : "stored");
+  print_line(output_mu, path, status, "image_id=" + std::to_string(result.value("image_id", int64_t{0})) + suffix);
+}
+
 bool process_one(const fs::path& path, const Options& options, const Endpoint& endpoint, LazyPipeline& pipeline,
                  const ProcessingCache& cache, httplib::Client& client, Counters& counters, std::mutex& output_mu) {
   try {
@@ -581,6 +668,11 @@ bool process_one(const fs::path& path, const Options& options, const Endpoint& e
     cv::Mat image = hvax::decode_image(bytes, options.max_pixels);
     if (image.empty()) throw std::runtime_error("unsupported or oversized image");
     const auto check = preflight(client, endpoint, options, bytes, image);
+    if (const auto detail = too_small_detail(check.response)) {
+      counters.too_small.fetch_add(1);
+      print_line(output_mu, path, "too-small", *detail);
+      return true;
+    }
     if (!check.process_required) {
       cache.store_remote(sha, check.response);
       counters.duplicate.fetch_add(1);
@@ -610,16 +702,7 @@ bool process_one(const fs::path& path, const Options& options, const Endpoint& e
     }
     const auto result = nlohmann::json::parse(response.body);
     cache.store_remote(sha, result);
-    const bool duplicate = result.value("duplicate", false);
-    const bool upgraded = result.value("master_replaced", false);
-    if (duplicate)
-      counters.duplicate.fetch_add(1);
-    else
-      counters.stored.fetch_add(1);
-    const std::string status = upgraded ? "upgraded" : (duplicate ? "duplicate" : "stored");
-    print_line(output_mu, path, status,
-               "image_id=" + std::to_string(result.value("image_id", int64_t{0})) +
-                   (cached ? " cache=hit" : ""));
+    report_ingested(path, result, cached ? " cache=hit" : "", counters, output_mu);
     return true;
   } catch (const PipelineInitializationError& error) {
     if (pipeline.report_failure_once()) {
@@ -634,11 +717,117 @@ bool process_one(const fs::path& path, const Options& options, const Endpoint& e
   }
 }
 
+// Asks the processor which gallery it forwards to, so remote-presence cache
+// entries stay keyed by the gallery and the same ones direct ingest uses.
+Processor connect_processor(const Options& options) {
+  Processor processor = parse_processor(options.processor);
+  httplib::Client client(processor.origin);
+  configure_client(client);
+  const auto health =
+      client.Get(processor.health_path, httplib::Headers{{"Accept", "application/json"}, {"User-Agent", "hvax/0.1"}});
+  if (!health)
+    throw ProcessorError("processor " + options.processor + " is unreachable: " + httplib::to_string(health.error()));
+  const auto body = health->status == 200 ? nlohmann::json::parse(health->body, nullptr, false) : nlohmann::json();
+  if (!body.is_object() || body.value("mode", "") != "local-processor" || !body.contains("remote") ||
+      !body["remote"].is_string())
+    throw ProcessorError(options.processor + " is not an hvax processor; start one with 'hvax serve'");
+  processor.gallery = body["remote"].get<std::string>();
+  if (body.contains("jobs") && body["jobs"].is_number_integer())
+    processor.jobs = static_cast<int>(std::clamp<int64_t>(body["jobs"].get<int64_t>(), 0, 256));
+  if (options.server_set) {
+    const Endpoint wanted = parse_endpoint(options.server);
+    Endpoint actual;
+    try {
+      actual = parse_endpoint(processor.gallery);
+    } catch (const std::exception&) {
+      throw ProcessorError("processor reports an unusable gallery URL: " + processor.gallery);
+    }
+    if (wanted.origin != actual.origin || wanted.processed_path != actual.processed_path)
+      throw ProcessorError("processor " + options.processor + " stores to " + processor.gallery + ", not " +
+                           options.server + "; drop --server (or HVAX_SERVER) or use a processor for that gallery");
+  }
+  return processor;
+}
+
+void proxy_one(const fs::path& path, const Options& options, const Processor& processor,
+               const ProcessingCache& cache, httplib::Client& client, Counters& counters, std::mutex& output_mu) {
+  try {
+    const auto bytes = read_file(path, options.max_bytes);
+    const auto sha = hvax::sha256_bytes(bytes);
+    if (const auto remote = cache.load_remote(sha)) {
+      counters.cached.fetch_add(1);
+      counters.duplicate.fetch_add(1);
+      print_line(output_mu, path, "cached-duplicate",
+                 "image_id=" + std::to_string(remote->value("image_id", int64_t{0})) +
+                     " remote=" + remote->value("duplicate_kind", "unknown"));
+      return;
+    }
+    const httplib::Headers headers = {{"Accept", "application/json"}, {"User-Agent", "hvax/0.1"}};
+    const std::string mime = mime_for(bytes);
+    const auto body = [&bytes](size_t offset, size_t length, httplib::DataSink& sink) {
+      return sink.write(reinterpret_cast<const char*>(bytes.data()) + offset,
+                        std::min(length, kProcessorWriteBytes));
+    };
+    httplib::Result response;
+    for (int attempt = 1;; ++attempt) {
+      // A new connection that opens with a large upload is the one that
+      // stalls; a small exchange first lets the filter settle on the flow.
+      if (!client.is_socket_open()) client.Get(processor.health_path, headers);
+      response = client.Post(processor.ingest_path, headers, bytes.size(), body, mime);
+      // Handlers always explain a 400; an empty one is the processor's HTTP
+      // layer abandoning a body that stopped arriving, so the image was not
+      // looked at and sending it again is safe.
+      const bool stalled = response && response->status == 400 && response->body.empty();
+      if (response && !stalled) break;
+      if (attempt == kProcessorAttempts) {
+        throw std::runtime_error(
+            (stalled ? std::string("processor stopped waiting for the image body")
+                     : "HTTP processor transport: " + httplib::to_string(response.error())) +
+            " (" + std::to_string(kProcessorAttempts) + " attempts)");
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(500 * attempt));
+    }
+    if (response->status == 204) {
+      counters.no_face.fetch_add(1);
+      print_line(output_mu, path, "no-face");
+      return;
+    }
+    if (response->status == 422) {
+      if (const auto detail = too_small_detail(nlohmann::json::parse(response->body, nullptr, false))) {
+        counters.too_small.fetch_add(1);
+        print_line(output_mu, path, "too-small", *detail);
+        return;
+      }
+    }
+    if (response->status != 200) {
+      throw std::runtime_error("HTTP " + std::to_string(response->status) +
+                               (response->body.empty() ? "" : ": " + response->body));
+    }
+    const auto result = nlohmann::json::parse(response->body);
+    cache.store_remote(sha, result);
+    // The processor answers with the gallery's preflight verdict (or its own
+    // remembered one) when the image did not need processing.
+    if (!result.value("process_required", true)) {
+      counters.duplicate.fetch_add(1);
+      print_line(output_mu, path, "duplicate",
+                 "image_id=" + std::to_string(result.value("image_id", int64_t{0})) +
+                     " preflight=" + result.value("duplicate_kind", "unknown"));
+      return;
+    }
+    report_ingested(path, result, "", counters, output_mu);
+  } catch (const std::exception& error) {
+    counters.errors.fetch_add(1);
+    print_line(output_mu, path, "error", error.what());
+  }
+}
+
 void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipeline& pipeline,
                       const ProcessingCache& cache) {
   httplib::Server server;
   server.new_task_queue = [jobs = options.jobs] { return new httplib::ThreadPool(jobs); };
   server.set_payload_max_length(options.max_bytes);
+  // The 5 s library default rejects uploads from slow or relayed links mid-body.
+  server.set_read_timeout(std::chrono::seconds(30));
 
   auto no_store = [](httplib::Response& response) {
     response.set_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
@@ -713,6 +902,14 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
       httplib::Client remote(endpoint.origin);
       configure_client(remote);
       const auto check = preflight(remote, endpoint, options, bytes, image);
+      if (const auto detail = too_small_detail(check.response)) {
+        // Answer as the gallery itself would have, had the image been uploaded.
+        auto body = check.response;
+        body["error"] = "image is too small: " + *detail;
+        response.status = 422;
+        response.set_content(body.dump(), "application/json");
+        return;
+      }
       if (!check.process_required) {
         cache.store_remote(sha, check.response);
         response.set_content(check.response.dump(), "application/json");
@@ -756,7 +953,9 @@ void run_local_server(const Options& options, const Endpoint& endpoint, LazyPipe
 int main(int argc, char** argv) {
   try {
     const Options options = parse_options(argc, argv);
-    const Endpoint endpoint = parse_endpoint(options.server);
+    std::optional<Processor> processor;
+    if (!options.processor.empty()) processor = connect_processor(options);
+    const Endpoint endpoint = parse_endpoint(processor ? processor->gallery : options.server);
     LazyPipeline pipeline(options);
     ProcessingCache cache(options, endpoint);
     if (options.command == "serve") {
@@ -773,17 +972,23 @@ int main(int argc, char** argv) {
     std::atomic<bool> stop{false};
     Counters counters;
     std::mutex output_mu;
-    const size_t worker_count = std::min(files.size(), static_cast<size_t>(options.jobs));
+    const int jobs = processor && !options.jobs_explicit && processor->jobs > 0 ? processor->jobs : options.jobs;
+    const size_t worker_count = std::min(files.size(), static_cast<size_t>(jobs));
     std::vector<std::thread> workers;
     workers.reserve(worker_count);
     for (size_t i = 0; i < worker_count; ++i) {
       workers.emplace_back([&] {
-        httplib::Client client(endpoint.origin);
-        configure_client(client);
+        httplib::Client client(processor ? processor->origin : endpoint.origin);
+        if (processor)
+          configure_processor_client(client);
+        else
+          configure_client(client);
         while (!stop.load()) {
           const size_t index = next.fetch_add(1);
           if (index >= files.size()) break;
-          if (!process_one(files[index], options, endpoint, pipeline, cache, client, counters, output_mu))
+          if (processor)
+            proxy_one(files[index], options, *processor, cache, client, counters, output_mu);
+          else if (!process_one(files[index], options, endpoint, pipeline, cache, client, counters, output_mu))
             stop.store(true);
           counters.completed.fetch_add(1);
         }
@@ -793,9 +998,13 @@ int main(int argc, char** argv) {
 
     std::cout << "summary\ttotal=" << files.size() << "\tstored=" << counters.stored.load()
               << "\tduplicate=" << counters.duplicate.load() << "\tno-face=" << counters.no_face.load()
+              << "\ttoo-small=" << counters.too_small.load()
               << "\tcached=" << counters.cached.load() << "\terrors=" << counters.errors.load()
               << "\taborted=" << files.size() - std::min<uint64_t>(files.size(), counters.completed.load()) << '\n';
     return counters.errors.load() == 0 ? 0 : 1;
+  } catch (const ProcessorError& error) {
+    std::cerr << "hvax: " << error.what() << '\n';
+    return 2;
   } catch (const std::exception& error) {
     std::cerr << "hvax: " << error.what() << "\n\n";
     usage();

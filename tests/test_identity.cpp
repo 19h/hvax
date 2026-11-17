@@ -551,3 +551,90 @@ TEST(Identity, HiddenIdentitiesAreSuppressedEverywhere) {
   EXPECT_FALSE(g.cooccurring(id_a, 10).empty());
   std::filesystem::remove_all(dir);
 }
+
+TEST(PurgeSmall, RemovesUndersizedImagesAndRepairsIdentities) {
+  auto dir = tmpdir();
+  hvax::ClusterParams p;
+  p.threads = 2;
+  std::vector<uint8_t> kept_bytes, small_bytes;
+  int64_t id_a = -1, id_b = -1, id_c = -1;
+  {
+    hvax::Gallery g(make_cfg(dir));
+    // A: three full-size photos. B: two full-size, two below the limit.
+    // C: only ever seen in small images.
+    for (int i = 0; i < 3; ++i) insert_image(g, 10 + i, {face_at(person_embedding(1, i), 10, 10, 200)});
+    kept_bytes = insert_image(g, 20, {face_at(person_embedding(2, 0), 10, 10, 200)}, 350, 350).bytes;
+    insert_image(g, 21, {face_at(person_embedding(2, 1), 10, 10, 200)});
+    small_bytes = insert_image(g, 22, {face_at(person_embedding(2, 2), 10, 10, 200)}, 349, 900).bytes;
+    insert_image(g, 23, {face_at(person_embedding(2, 3), 10, 10, 200)}, 900, 349);
+    insert_image(g, 30, {face_at(person_embedding(3, 0), 10, 10, 150)}, 200, 200);
+    // A small group shot: one face of A and one of C.
+    insert_image(g, 31, {face_at(person_embedding(3, 1), 10, 10, 150), face_at(person_embedding(1, 5), 160, 10, 150)},
+                 340, 340);
+    ASSERT_TRUE(g.recluster(p).has_value());
+    ASSERT_EQ(g.identity_count(), 3u);
+    id_a = g.face(0).identity_id;
+    id_b = g.face(3).identity_id;
+    id_c = g.face(7).identity_id;
+    ASSERT_EQ(g.identity(id_a)->size, 4u);
+    ASSERT_EQ(g.identity(id_b)->size, 4u);
+    ASSERT_EQ(g.identity(id_c)->size, 2u);
+    EXPECT_EQ(g.undersized_images(350), 4u);
+    EXPECT_EQ(g.undersized_images(0), 0u);
+
+    // Without apply the report is complete and nothing changes.
+    const auto dry = g.purge_small(350, false);
+    EXPECT_FALSE(dry.applied);
+    EXPECT_EQ(dry.images_live, 9u);
+    EXPECT_EQ(dry.images, 4u);
+    EXPECT_EQ(dry.faces, 5u);
+    EXPECT_GT(dry.bytes, 0u);
+    EXPECT_EQ(dry.identities_touched, 3u);
+    EXPECT_EQ(dry.identities_emptied, 1u);
+    EXPECT_EQ(g.live_images(), 9u);
+    EXPECT_EQ(g.live_faces(), 10u);
+    EXPECT_TRUE(std::filesystem::exists(g.image_path(hvax::sha256_bytes(small_bytes))));
+
+    const auto done = g.purge_small(350, true);
+    EXPECT_TRUE(done.applied);
+    EXPECT_EQ(done.images, dry.images);
+    EXPECT_EQ(done.faces, dry.faces);
+    EXPECT_EQ(done.bytes, dry.bytes);
+    EXPECT_EQ(done.identities_emptied, 1u);
+    EXPECT_EQ(g.live_images(), 5u);
+    EXPECT_EQ(g.live_faces(), 5u);
+    EXPECT_EQ(g.indexed_faces(), 5u);
+    EXPECT_EQ(g.undersized_images(350), 0u);
+    // masters of the removed images are gone, the 350x350 one is at the limit and stays
+    EXPECT_FALSE(std::filesystem::exists(g.image_path(hvax::sha256_bytes(small_bytes))));
+    EXPECT_FALSE(g.find_by_sha(hvax::sha256_bytes(small_bytes)).has_value());
+    EXPECT_TRUE(std::filesystem::exists(g.image_path(hvax::sha256_bytes(kept_bytes))));
+    EXPECT_TRUE(g.find_by_sha(hvax::sha256_bytes(kept_bytes)).has_value());
+    // identities follow: A and B shrink, C is gone
+    EXPECT_EQ(g.identity_count(), 2u);
+    EXPECT_EQ(g.identity(id_a)->size, 3u);
+    EXPECT_EQ(g.identity(id_a)->n_images, 3u);
+    EXPECT_EQ(g.identity(id_b)->size, 2u);
+    EXPECT_FALSE(g.identity(id_c).has_value());
+    EXPECT_TRUE(g.search(person_embedding(3, 0).data(), 5, 0.5f).empty());
+    hvax::SearchOptions all;
+    all.k = 50;
+    all.min_score = -1.f;
+    all.include_low_quality = true;
+    for (const auto& hit : g.search(person_embedding(2, 2).data(), all)) EXPECT_LE(hit.image_id, 5);
+    EXPECT_THROW(g.face(5), std::runtime_error);
+
+    const auto again = g.purge_small(350, true);
+    EXPECT_EQ(again.images, 0u);
+    EXPECT_EQ(again.images_live, 5u);
+  }
+  // survives a reopen
+  hvax::Gallery g(make_cfg(dir));
+  EXPECT_EQ(g.live_images(), 5u);
+  EXPECT_EQ(g.live_faces(), 5u);
+  EXPECT_EQ(g.identity_count(), 2u);
+  EXPECT_EQ(g.identity(id_b)->size, 2u);
+  EXPECT_EQ(g.undersized_images(350), 0u);
+  EXPECT_TRUE(g.search(person_embedding(3, 0).data(), 5, 0.5f).empty());
+  std::filesystem::remove_all(dir);
+}

@@ -63,6 +63,23 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
 
+    if (cfg.purge_small) {
+      const auto r = engine.gallery().purge_small(cfg.min_image_side, cfg.purge_apply);
+      std::cout << nlohmann::json{{"min_image_side", r.min_side},
+                                  {"applied", r.applied},
+                                  {"images_live", r.images_live},
+                                  {"images", r.images},
+                                  {"faces", r.faces},
+                                  {"bytes", r.bytes},
+                                  {"identities_touched", r.identities_touched},
+                                  {"identities_emptied", r.identities_emptied},
+                                  {"ms", r.ms}}
+                       .dump(2)
+                << "\n";
+      if (!cfg.purge_apply && r.images > 0)
+        std::cerr << "nothing was removed; add --apply to delete these images\n";
+      if (!cfg.reindex && !cfg.cluster_once && cfg.eval_impostor_pairs == 0) return 0;
+    }
     if (cfg.reindex) {
       const auto r = engine.reindex();
       std::cout << nlohmann::json{{"rows", r.rows},

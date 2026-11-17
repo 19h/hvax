@@ -2,10 +2,13 @@
   "name": "hvax-ingest",
   "private": true,
   "version": "0.3.0",
-  "description": "Chrome extension: watch every image on a page and POST it to hvaxd.",
+  "description": "Chrome and Safari extension: watch every image on a page and POST it to hvaxd.",
   "scripts": {
     "build": "node esbuild.mjs",
-    "test": "npm run build && node tests/background-fallback.mjs",
+    "build:safari": "node esbuild.mjs --safari",
+    "safari": "npm run build:safari && xcodebuild -project safari/hvax-ingest.xcodeproj -scheme 'hvax ingest' -configuration Release -derivedDataPath safari/build MARKETING_VERSION=$npm_package_version build",
+    "test:safari": "npm run build:safari && node tests/background-fallback.mjs dist-safari && node tests/stats-ascii.mjs dist-safari && node tests/too-small.mjs dist-safari",
+    "test": "npm run build && node tests/background-fallback.mjs && node tests/backend-skip.mjs && node tests/stats-ascii.mjs && node tests/too-small.mjs",
     "watch": "node esbuild.mjs --watch",
     "typecheck": "tsc --noEmit"
   },

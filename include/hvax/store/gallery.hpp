@@ -96,6 +96,20 @@ struct ReindexReport {
   double ms = 0;
 };
 
+// Result of Gallery::purge_small. Without `applied` the counts describe what a
+// run would remove.
+struct PurgeReport {
+  int min_side = 0;
+  bool applied = false;
+  uint64_t images_live = 0;         // live images before the purge
+  uint64_t images = 0;              // images with a side below min_side
+  uint64_t faces = 0;               // their faces
+  uint64_t bytes = 0;               // their master files
+  uint64_t identities_touched = 0;  // identities losing at least one face
+  uint64_t identities_emptied = 0;  // identities losing every face
+  double ms = 0;
+};
+
 // Label-free evaluation of the embedding model on this gallery: faces that
 // share a photo without overlapping boxes are near-certain different people.
 struct ImpostorReport {
@@ -148,6 +162,13 @@ class Gallery {
                                 const std::vector<DetectedFace>& new_faces);
 
   bool remove_image(int64_t image_id);
+
+  // Images with either side below min_side: stored before the ingest limit
+  // (Config::min_image_side) existed or while it was lower.
+  uint64_t undersized_images(int min_side) const;
+  // Remove those images with their faces and master files. With apply=false
+  // nothing is modified and the report says what would go.
+  PurgeReport purge_small(int min_side, bool apply);
 
   std::vector<Hit> search(const float* query, int k, float min_score) const;
   std::vector<Hit> search(const float* query, const SearchOptions& opts) const;
@@ -233,14 +254,16 @@ class Gallery {
   bool passes_gate(const DetectedFace& f) const;
   bool passes_gate(const FaceSlot& s) const;
   void append_face_locked(uint64_t image_id, const DetectedFace& f, int64_t now);
-  void tombstone_face_locked(uint64_t row);
+  // recompute=false leaves the face's identity stale; the caller recomputes it.
+  void tombstone_face_locked(uint64_t row, bool recompute = true);
+  bool remove_image_locked(int64_t image_id, bool recompute = true);
   void track_image_face_locked(uint64_t image_id, uint64_t row);
 
   // identity internals; caller holds the unique lock
   void load_identity_state_locked();
   void refresh_centroid_norm_locked(int64_t id);
   void assign_locked(uint64_t row, int64_t id, bool touch_stats);
-  void unassign_locked(uint64_t row);
+  void unassign_locked(uint64_t row, bool recompute = true);
   int64_t new_identity_locked(int64_t now);
   void recompute_identity_locked(int64_t id, int64_t now);
   void try_join_identity_locked(uint64_t row);

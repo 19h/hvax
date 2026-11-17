@@ -20,6 +20,7 @@ namespace hvax {
 struct Metrics {
   std::atomic<uint64_t> ingest_total{0};
   std::atomic<uint64_t> ingest_ignored{0};
+  std::atomic<uint64_t> ingest_too_small{0};
   std::atomic<uint64_t> ingest_dup_sha{0};
   std::atomic<uint64_t> ingest_dup_phash{0};
   std::atomic<uint64_t> master_replace{0};
@@ -99,6 +100,10 @@ class Engine {
   std::vector<DetectedFace> debug_once(const cv::Mat& bgr);
 
  private:
+  bool too_small(int64_t width, int64_t height) const {
+    return image_too_small(width, height, cfg_.min_image_side);
+  }
+  IngestResult reject_too_small(int width, int height);
   bool confirm_soft(int64_t image_id, const std::vector<DetectedFace>& faces) const;
   Pipeline& pipeline();
   std::vector<DetectedFace> run_pipeline(const cv::Mat& bgr);

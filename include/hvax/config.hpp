@@ -27,6 +27,9 @@ struct Config {
   float default_min_score = kDefaultMinScore;
   size_t max_upload = 20 * 1024 * 1024;
   int64_t max_pixels = 100000000;
+  // Ingest refuses images with either side below this; 0 accepts any size.
+  // Queries are not affected.
+  int min_image_side = kDefaultMinImageSide;
   std::string once_image;
   bool compact = false;
   bool print_help = false;
@@ -58,6 +61,10 @@ struct Config {
   std::string identity_key;
 
   // One-shot maintenance modes; the daemon exits after running them.
+  // Remove stored images below min_image_side. Reports only unless
+  // purge_apply is set.
+  bool purge_small = false;
+  bool purge_apply = false;
   bool reindex = false;
   bool cluster_once = false;
   int eval_impostor_pairs = 0;  // >0: print the impostor evaluation as JSON and exit

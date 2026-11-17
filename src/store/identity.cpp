@@ -161,7 +161,7 @@ void Gallery::assign_locked(uint64_t row, int64_t id, bool touch_stats) {
   if (touch_stats) recompute_identity_locked(id, unix_ms());
 }
 
-void Gallery::unassign_locked(uint64_t row) {
+void Gallery::unassign_locked(uint64_t row, bool recompute) {
   FaceSlot& f = faces_.at(row);
   const int64_t id = identity_of(f);
   if (id < 0) return;
@@ -169,7 +169,7 @@ void Gallery::unassign_locked(uint64_t row) {
   if (static_cast<uint64_t>(id) >= members_.size()) return;
   auto& rows = members_[static_cast<size_t>(id)];
   rows.erase(std::remove(rows.begin(), rows.end(), static_cast<uint32_t>(row)), rows.end());
-  recompute_identity_locked(id, unix_ms());
+  if (recompute) recompute_identity_locked(id, unix_ms());
 }
 
 int64_t Gallery::best_identity_locked(const float* query, float* score_out) const {

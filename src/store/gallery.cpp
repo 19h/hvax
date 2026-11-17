@@ -291,10 +291,10 @@ void Gallery::append_face_locked(uint64_t image_id, const DetectedFace& f, int64
   }
 }
 
-void Gallery::tombstone_face_locked(uint64_t row) {
+void Gallery::tombstone_face_locked(uint64_t row, bool recompute) {
   FaceSlot& f = faces_.at(row);
   if (!slot_live(f.flags)) return;
-  unassign_locked(row);
+  unassign_locked(row, recompute);
   f.flags |= kTombstone;
   flags_cache_[static_cast<size_t>(row)] |= kTombstone;
   hnsw_.remove(row);
@@ -460,8 +460,7 @@ std::vector<FaceView> Gallery::upgrade(int64_t image_id, std::span<const uint8_t
   return out;
 }
 
-bool Gallery::remove_image(int64_t image_id) {
-  std::unique_lock lock(mu_);
+bool Gallery::remove_image_locked(int64_t image_id, bool recompute) {
   if (image_id <= 0 || static_cast<uint64_t>(image_id) > images_.size()) return false;
   ImageSlot& im = images_.at(static_cast<uint64_t>(image_id - 1));
   if (!slot_live(im.flags)) return false;
@@ -472,12 +471,75 @@ bool Gallery::remove_image(int64_t image_id) {
   k.v = sha;
   sha_to_idx_.erase(k);
   const std::vector<uint32_t> rows = image_faces_[static_cast<size_t>(image_id - 1)];
-  for (uint32_t r : rows) tombstone_face_locked(r);
+  for (uint32_t r : rows) tombstone_face_locked(r, recompute);
   unlink_master(sha);
+  return true;
+}
+
+bool Gallery::remove_image(int64_t image_id) {
+  std::unique_lock lock(mu_);
+  if (!remove_image_locked(image_id)) return false;
   images_.sync_header();
   faces_.sync_header();
   identities_.sync_header();
   return true;
+}
+
+uint64_t Gallery::undersized_images(int min_side) const {
+  if (min_side <= 0) return 0;
+  std::shared_lock lock(mu_);
+  uint64_t n = 0;
+  for (uint64_t i = 0; i < images_.size(); ++i) {
+    const auto& im = images_.at(i);
+    if (slot_live(im.flags) && image_too_small(im.width, im.height, min_side)) ++n;
+  }
+  return n;
+}
+
+PurgeReport Gallery::purge_small(int min_side, bool apply) {
+  std::unique_lock lock(mu_);
+  const auto t0 = std::chrono::steady_clock::now();
+  PurgeReport r;
+  r.min_side = min_side;
+  r.applied = apply;
+
+  std::vector<int64_t> victims;
+  std::unordered_map<int64_t, uint64_t> lost;  // identity -> member faces going away
+  for (uint64_t i = 0; i < images_.size(); ++i) {
+    const auto& im = images_.at(i);
+    if (!slot_live(im.flags)) continue;
+    ++r.images_live;
+    if (!image_too_small(im.width, im.height, min_side)) continue;
+    ++r.images;
+    r.bytes += im.nbytes;
+    victims.push_back(static_cast<int64_t>(i + 1));
+    for (uint32_t row : image_faces_[static_cast<size_t>(i)]) {
+      ++r.faces;
+      const int64_t id = identity_of(faces_.at(row));
+      if (id >= 0) ++lost[id];
+    }
+  }
+  r.identities_touched = lost.size();
+  for (const auto& [id, n] : lost)
+    if (static_cast<uint64_t>(id) < members_.size() && n >= members_[static_cast<size_t>(id)].size())
+      ++r.identities_emptied;
+
+  if (apply && !victims.empty()) {
+    // Identities are recomputed once each at the end rather than per face.
+    for (int64_t image_id : victims) remove_image_locked(image_id, false);
+    const int64_t now = unix_ms();
+    for (const auto& [id, _] : lost) recompute_identity_locked(id, now);
+    images_.fsync_all();
+    faces_.fsync_all();
+    identities_.fsync_all();
+    centroids_.fsync_all();
+    hnsw_.save();
+  }
+  r.ms = ms_since(t0);
+  spdlog::info("purge-small min_side={} {} images={} faces={} bytes={} identities_touched={} emptied={} {:.0f}ms",
+               min_side, apply ? "removed" : "would remove", r.images, r.faces, r.bytes, r.identities_touched,
+               r.identities_emptied, r.ms);
+  return r;
 }
 
 bool Gallery::row_hidden_locked(uint64_t row) const {

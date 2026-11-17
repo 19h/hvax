@@ -198,10 +198,23 @@ nlohmann::json ingest_json(const IngestResult& r) {
   return j;
 }
 
-void set_ingest_response(const IngestResult& r, httplib::Response& res) {
+// Body of every "image is below --min-image-side" answer. `rejected` is the
+// machine-readable verdict; clients must not retry.
+nlohmann::json too_small_json(int width, int height, int min_side, bool with_error = true) {
+  nlohmann::json j = {{"rejected", "too_small"}, {"width", width}, {"height", height}, {"min_side", min_side}};
+  if (with_error) j["error"] = "image is smaller than " + std::to_string(min_side) + "x" + std::to_string(min_side);
+  return j;
+}
+
+void set_ingest_response(const IngestResult& r, httplib::Response& res, int min_image_side) {
   if (r.status == IngestStatus::bad_image) {
     res.status = 415;
     res.set_content("{\"error\":\"not an image\"}", "application/json");
+    return;
+  }
+  if (r.status == IngestStatus::too_small) {
+    res.status = 422;
+    res.set_content(too_small_json(r.width, r.height, min_image_side).dump(), "application/json");
     return;
   }
   if (r.status == IngestStatus::ignored_no_face) {
@@ -612,6 +625,8 @@ nlohmann::json stats_json(const Engine& engine, bool keyed) {
           {"identity_key_ok", keyed},
           {"identity_key_configured", !engine.config().identity_key.empty()},
           {"images", g.live_images()},
+          {"min_image_side", engine.config().min_image_side},
+          {"undersized_images", g.undersized_images(engine.config().min_image_side)},
           {"embedding_rows", g.embedding_rows()},
           {"indexed_faces", g.indexed_faces()},
           {"low_quality_faces", g.low_quality_faces()},
@@ -735,6 +750,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     nlohmann::json j = {{"status", "ok"},
                         {"faces", engine.gallery().live_faces()},
                         {"images", engine.gallery().live_images()},
+                        {"min_image_side", cfg.min_image_side},
                         {"identities", engine.gallery().identity_count()},
                         {"hnsw", engine.gallery().hnsw_active()},
                         {"jobs", cfg.http_threads}};
@@ -758,7 +774,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     if (bytes.empty()) return json_error(res, 400, "empty body");
     if (bytes.size() > cfg.max_upload) return json_error(res, 413, "image exceeds max upload size");
     auto r = engine.ingest(bytes);
-    set_ingest_response(r, res);
+    set_ingest_response(r, res, cfg.min_image_side);
   });
 
   svr.Post("/v1/ingest/pdf", [&, auth](const httplib::Request& req, httplib::Response& res) {
@@ -862,6 +878,11 @@ void register_routes(Engine& engine, httplib::Server& svr) {
         if (result.status == IngestStatus::ignored_no_face) {
           results.push_back({{"page", number}, {"status", "no_face"}, {"cropped", cropped},
                              {"rotation", rotation}, {"source", use_embedded_image ? "embedded_image" : "page"}});
+        } else if (result.status == IngestStatus::too_small) {
+          auto entry = too_small_json(result.width, result.height, cfg.min_image_side);
+          entry.update({{"page", number}, {"status", "too_small"}, {"cropped", cropped}, {"rotation", rotation},
+                        {"source", use_embedded_image ? "embedded_image" : "page"}});
+          results.push_back(std::move(entry));
         } else if (result.status == IngestStatus::bad_image) {
           results.push_back({{"page", number}, {"status", "error"},
                              {"cropped", cropped},
@@ -906,6 +927,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       }
       const auto check = engine.check_ingest(sha, phash, dhash, width, height);
       nlohmann::json result = {{"duplicate", check.duplicate}, {"process_required", check.process_required}};
+      if (!check.rejected.empty()) result.update(too_small_json(check.width, check.height, cfg.min_image_side, false));
       if (check.duplicate) {
         result["duplicate_kind"] = check.duplicate_kind;
         result["image_id"] = check.image_id;
@@ -935,7 +957,7 @@ void register_routes(Engine& engine, httplib::Server& svr) {
     cv::Mat image = decode_image(bytes, cfg.max_pixels);
     if (image.empty()) return json_error(res, 415, "not an image");
     if (!validate_processed_faces(faces, image.cols, image.rows, error)) return json_error(res, 422, error);
-    set_ingest_response(engine.ingest_processed(bytes, image, faces), res);
+    set_ingest_response(engine.ingest_processed(bytes, image, faces), res, cfg.min_image_side);
   });
 
   svr.Post("/v1/query/embedding", [&, auth](const httplib::Request& req, httplib::Response& res) {

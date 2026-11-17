@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const dist = join(root, "dist");
+// --safari builds the same sources into dist-safari/, which the Xcode project
+// in safari/ bundles into the app extension.
+const safari = process.argv.includes("--safari");
+const dist = join(root, safari ? "dist-safari" : "dist");
 const watch = process.argv.includes("--watch");
 
 mkdirSync(dist, { recursive: true });
@@ -13,8 +16,9 @@ mkdirSync(join(dist, "icons"), { recursive: true });
 
 const common = {
   bundle: true,
-  sourcemap: true,
-  target: "chrome114",
+  // The Safari bundle is copied into the app verbatim, so leave the maps out.
+  sourcemap: !safari,
+  target: safari ? "safari17" : "chrome114",
   logLevel: "info",
 };
 
@@ -57,6 +61,12 @@ function copyStatic() {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const manifest = JSON.parse(readFileSync(join(dist, "manifest.json"), "utf8"));
   manifest.version = pkg.version;
+  if (safari) {
+    // Safari runs MV3 background code as a non-persistent module page, and its
+    // toolbar tints a monochrome glyph instead of showing a full-colour icon.
+    manifest.background = { scripts: [manifest.background.service_worker], type: "module" };
+    manifest.action.default_icon = "icons/toolbar-icon.svg";
+  }
   writeFileSync(join(dist, "manifest.json"), JSON.stringify(manifest, null, 2));
 }
 

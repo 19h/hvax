@@ -20,6 +20,7 @@
 #include "hvax/http/landing_html.hpp"
 #include "hvax/http/server.hpp"
 #include "hvax/pipeline.hpp"
+#include "hvax/processed.hpp"
 #include "hvax/util/hex.hpp"
 
 TEST(Landing, HtmlDocument) {
@@ -521,5 +522,98 @@ TEST(HttpApi, HidingWithoutConfiguredKeyIsRefused) {
   auto c = live.client();
   EXPECT_EQ(c.Post("/v1/identities/0/hide", httplib::Headers{{"X-Identity-Key", "anything"}}, "", "application/json")->status, 403);
   EXPECT_FALSE(nlohmann::json::parse(c.Get("/v1/stats")->body)["identity_key_configured"].get<bool>());
+  std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+std::string small_jpeg(int width, int height) {
+  cv::Mat image(height, width, CV_8UC3, cv::Scalar(40, 90, 200));
+  std::vector<uint8_t> bytes;
+  cv::imencode(".jpg", image, bytes);
+  return std::string(bytes.begin(), bytes.end());
+}
+
+}  // namespace
+
+TEST(HttpApi, IngestRefusesImagesBelowTheMinimumSide) {
+  auto dir = http_tmpdir();
+  hvax::Config cfg;
+  cfg.data_dir = dir.string();
+  cfg.models_dir = (dir / "models-do-not-exist").string();  // a refusal must come before inference
+  cfg.dedup = hvax::DedupMode::sha256;
+  const std::string legacy = small_jpeg(200, 300);
+  {
+    // A gallery written before the limit existed holds a small image.
+    hvax::Config old = cfg;
+    old.min_image_side = 0;
+    hvax::Engine engine(old);
+    std::vector<uint8_t> bytes(legacy.begin(), legacy.end());
+    cv::Mat image = cv::imdecode(bytes, cv::IMREAD_COLOR);
+    ASSERT_EQ(engine.ingest_processed(bytes, image, {face_at(person_embedding(1, 0), 10, 10, 150)}).status,
+              hvax::IngestStatus::stored);
+  }
+
+  hvax::Engine engine(cfg);
+  ingest(engine, 10, {face_at(person_embedding(2, 0), 10, 10, 200)});
+  LiveServer live(engine);
+  auto c = live.client();
+
+  auto expect_refusal = [](const httplib::Result& r, int width, int height) {
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 422) << r->body;
+    const auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["rejected"], "too_small");
+    EXPECT_EQ(j["width"], width);
+    EXPECT_EQ(j["height"], height);
+    EXPECT_EQ(j["min_side"], 350);
+    EXPECT_EQ(j["error"], "image is smaller than 350x350");
+  };
+  expect_refusal(c.Post("/v1/ingest", small_jpeg(349, 900), "image/jpeg"), 349, 900);
+  expect_refusal(c.Post("/v1/ingest", small_jpeg(900, 120), "image/jpeg"), 900, 120);
+  // The copy stored earlier does not turn the refusal into a "duplicate".
+  expect_refusal(c.Post("/v1/ingest", legacy, "image/jpeg"), 200, 300);
+  {
+    httplib::MultipartFormDataItems items = {
+        {"payload", hvax::processed_payload_json({face_at(person_embedding(3, 0), 10, 10, 100)}).dump(), "payload.json",
+         "application/json"},
+        {"image", small_jpeg(300, 300), "small.jpg", "image/jpeg"},
+    };
+    expect_refusal(c.Post("/v1/ingest/processed", items), 300, 300);
+  }
+  {
+    const std::string hash(16, 'a');
+    nlohmann::json body = {{"sha256", std::string(64, 'b')}, {"phash", hash}, {"dhash", hash},
+                           {"width", 349}, {"height", 350}};
+    auto r = c.Post("/v1/ingest/check", body.dump(), "application/json");
+    ASSERT_EQ(r->status, 200) << r->body;
+    auto j = nlohmann::json::parse(r->body);
+    EXPECT_EQ(j["rejected"], "too_small");
+    EXPECT_FALSE(j["process_required"].get<bool>());
+    EXPECT_FALSE(j["duplicate"].get<bool>());
+    EXPECT_EQ(j["min_side"], 350);
+    EXPECT_FALSE(j.contains("error"));
+    body["width"] = 350;
+    j = nlohmann::json::parse(c.Post("/v1/ingest/check", body.dump(), "application/json")->body);
+    EXPECT_FALSE(j.contains("rejected"));
+    EXPECT_TRUE(j["process_required"].get<bool>());
+  }
+  // Searching with a small probe stays allowed; only storing is refused.
+  EXPECT_NE(c.Post("/v1/query/embedding", raw_embedding(person_embedding(2, 0)), "application/octet-stream")->status,
+            422);
+
+  auto stats = nlohmann::json::parse(c.Get("/v1/stats")->body);
+  EXPECT_EQ(stats["images"], 2);
+  EXPECT_EQ(stats["min_image_side"], 350);
+  EXPECT_EQ(stats["undersized_images"], 1);
+  EXPECT_EQ(nlohmann::json::parse(c.Get("/health")->body)["min_image_side"], 350);
+  EXPECT_NE(c.Get("/metrics")->body.find("hvax_ingest_rejected_total{reason=\"too_small\"} 4"), std::string::npos);
+  EXPECT_NE(c.Get("/metrics")->body.find("hvax_images_undersized 1"), std::string::npos);
+
+  const auto purged = engine.gallery().purge_small(cfg.min_image_side, true);
+  EXPECT_EQ(purged.images, 1u);
+  stats = nlohmann::json::parse(c.Get("/v1/stats")->body);
+  EXPECT_EQ(stats["images"], 1);
+  EXPECT_EQ(stats["undersized_images"], 0);
   std::filesystem::remove_all(dir);
 }
