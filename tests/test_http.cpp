@@ -43,6 +43,8 @@ TEST(Landing, HtmlDocument) {
   EXPECT_NE(html.find("hasFaceThumbnails"), std::string_view::npos);
   EXPECT_NE(html.find("has-thumb"), std::string_view::npos);
   EXPECT_NE(html.find("not my person"), std::string_view::npos);
+  EXPECT_NE(html.find("data-sort='resolution'"), std::string_view::npos);
+  EXPECT_NE(html.find("function dimLabel"), std::string_view::npos);
   EXPECT_NE(html.find("zoomable"), std::string_view::npos);
   EXPECT_NE(html.find("IntersectionObserver"), std::string_view::npos);
   EXPECT_NE(html.find("MAX_IMAGE_REQUESTS = 4"), std::string_view::npos);
@@ -234,6 +236,8 @@ TEST(HttpApi, IdentityRoutesEndToEnd) {
     auto f = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/faces?limit=2", key)->body);
     ASSERT_EQ(f["faces"].size(), 2u);
     EXPECT_GE(f["faces"][0]["score"].get<float>(), f["faces"][1]["score"].get<float>());
+    EXPECT_EQ(f["faces"][0]["width"], 640);
+    EXPECT_EQ(f["faces"][0]["height"], 640);
     auto co = nlohmann::json::parse(c.Get("/v1/identities/" + std::to_string(id_a) + "/cooccurring", key)->body);
     ASSERT_EQ(co["cooccurring"].size(), 1u);
     EXPECT_EQ(co["cooccurring"][0]["size"], 4);
@@ -266,6 +270,11 @@ TEST(HttpApi, IdentityRoutesEndToEnd) {
     auto j = nlohmann::json::parse(r->body);
     ASSERT_GE(j["hits"].size(), 2u);
     EXPECT_EQ(j["hits"][0]["identity_id"], id_a);
+    // every hit says how large the image it comes from is
+    for (const auto& hit : j["hits"]) {
+      EXPECT_EQ(hit["width"], 640);
+      EXPECT_EQ(hit["height"], 640);
+    }
     EXPECT_EQ(j["hits"][0]["collapsed"], 3);
 
     httplib::Headers hi = key;

@@ -316,6 +316,16 @@
     font-size: 12px;
   }
   .out-h strong { color: var(--cyan); font-weight: 400; }
+  .out-h button {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: var(--mute);
+    font: inherit;
+    cursor: pointer;
+  }
+  .out-h button:hover { color: var(--bright); }
+  .out-h button.on { color: var(--cyan); }
   .preview {
     display: grid;
     grid-template-columns: minmax(0, 220px) minmax(0, 1fr);
@@ -510,6 +520,29 @@
     padding: 0 3px;
     font-variant-numeric: tabular-nums;
   }
+  /* Pixel size of the full image a thumbnail links to. */
+  .pc b.dim, .tg-img b.dim, .hit-media b.dim {
+    left: 2px;
+    right: auto;
+    font-size: 9px;
+    letter-spacing: 0;
+    white-space: nowrap;
+    color: var(--bright);
+    pointer-events: none;
+  }
+  .pc b.dim { top: 2px; bottom: auto; }
+  .hit-media b.dim {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    z-index: 1;
+    font-size: 8px;
+    line-height: 1.35;
+    font-weight: 400;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    padding: 0 2px;
+    font-variant-numeric: tabular-nums;
+  }
   .pc.on { border-color: var(--hot); }
   .together {
     grid-column: 1 / -1;
@@ -670,6 +703,7 @@
     .stats { grid-template-columns: 1fr 1fr 1fr; }
     .people-grid { grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); }
     .tg-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
+    .tg-img b.dim { top: 2px; bottom: auto; }
   }
   .adminbtn { color: var(--warn) !important; }
   .hiddentag { color: var(--warn); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
@@ -802,6 +836,8 @@
   let mode = "query";
   let nextReferenceId = 1;
   let results = [];
+  let resultSort = "score";
+  try { if (sessionStorage.getItem("hvax-sort") === "resolution") resultSort = "resolution"; } catch (e) {}
   let hasSearched = false;
   let searchBusy = false;
   let searchError = "";
@@ -983,6 +1019,13 @@
     const d = new Date(Number(ms));
     return isNaN(d) ? "—" : d.toISOString().slice(0, 10);
   }
+  // "1920×1080" badge for a thumbnail that links to the full image; empty
+  // when the server did not say how large the image is.
+  function dimLabel(item) {
+    const width = Number(item && item.width), height = Number(item && item.height);
+    if (!(width > 0) || !(height > 0)) return "";
+    return "<b class='dim' title='full image is " + width + "×" + height + " px'>" + width + "×" + height + "</b>";
+  }
   function personLabel(p) {
     return p.name ? esc(p.name) : "#" + esc(p.identity_id);
   }
@@ -1073,7 +1116,7 @@
       a.target = "_blank";
       a.rel = "noopener";
       a.title = "img " + im.image_id + " · open full image";
-      a.innerHTML = "<img alt='' class='loading'><b>" + esc(when(im.created_at)) + "</b>";
+      a.innerHTML = "<img alt='' class='loading'>" + dimLabel(im) + "<b>" + esc(when(im.created_at)) + "</b>";
       grid.appendChild(a);
       const img = a.querySelector("img");
       pairThumb(im).then((url) => {
@@ -1173,7 +1216,7 @@
         html += "<h3>faces</h3><div class='people-grid'>";
         for (const f of list) {
           html += "<a class='pc' href='" + (f.sha256 ? "/v1/images/" + esc(f.sha256) : "/v1/faces/" + esc(f.face_id)) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
-            + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'><b>" + Number(f.score).toFixed(2) + "</b></a>";
+            + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'>" + dimLabel(f) + "<b>" + Number(f.score).toFixed(2) + "</b></a>";
         }
         html += "</div>";
       }
@@ -1239,7 +1282,7 @@
     html += "<h3>faces</h3><div class='people-grid' id='pfaces'>";
     for (const f of (faces && faces.faces) || []) {
       html += "<a class='pc' href='" + (f.sha256 ? "/v1/images/" + esc(f.sha256) : "/v1/faces/" + esc(f.face_id)) + "' target='_blank' rel='noopener' title='face " + esc(f.face_id) + " · " + Number(f.score).toFixed(3) + "'>"
-        + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'><b>" + Number(f.score).toFixed(2) + "</b></a>";
+        + "<img alt='' data-face='" + esc(f.face_id) + "' data-size='96'>" + dimLabel(f) + "<b>" + Number(f.score).toFixed(2) + "</b></a>";
     }
     html += "</div>";
     const cos = (co && co.cooccurring) || [];
@@ -1685,6 +1728,32 @@
     renderSearchResults();
   }
 
+  // Hits in display order. The server ranks by score; "resolution" puts the
+  // largest source images first and keeps the score order among equals.
+  function sortedResults() {
+    if (resultSort !== "resolution") return results;
+    const pixels = (hit) => (Number(hit.width) || 0) * (Number(hit.height) || 0);
+    return results.map((hit, index) => ({ hit, index }))
+      .sort((a, b) => pixels(b.hit) - pixels(a.hit) || a.index - b.index)
+      .map((entry) => entry.hit);
+  }
+
+  // Reorders the rendered hits in place, so thumbnails and the people cards
+  // below are not loaded again.
+  function setResultSort(sort) {
+    resultSort = sort;
+    try { sessionStorage.setItem("hvax-sort", sort); } catch (e) {}
+    for (const button of out.querySelectorAll("[data-sort]")) button.classList.toggle("on", button.dataset.sort === sort);
+    const list = out.querySelector(".hits");
+    if (!list) return;
+    const rows = new Map();
+    for (const element of list.querySelectorAll(".hit")) rows.set(Number(element.dataset.face), element);
+    for (const hit of sortedResults()) {
+      const element = rows.get(Number(hit.face_id));
+      if (element) list.appendChild(element);
+    }
+  }
+
   function renderSearchResults() {
     if (mode !== "query") return;
     if (resultThumbObserver) {
@@ -1698,18 +1767,22 @@
     }
     out.className = "show";
     let html = "<div class='out-h'><strong>" + (searchError ? "search error" : "matches") + "</strong><span>" +
+      (results.length > 1
+        ? "sort <button type='button' data-sort='score' title='best match first'" + (resultSort === "score" ? " class='on'" : "") + ">score</button> · " +
+          "<button type='button' data-sort='resolution' title='largest image first'" + (resultSort === "resolution" ? " class='on'" : "") + ">resolution</button> · "
+        : "") +
       (searchBusy ? "working…" : results.length + " images" + (lastSearchMs ? " · " + lastSearchMs + " ms" : "")) +
       "</span></div>";
     if (searchError) html += "<div class='err'>" + esc(searchError) + "</div>";
     if (!searchError && results.length === 0) html += "<div class='out-h'><span>no matches above the minimum score</span></div>";
     if (results.length > 0) html += "<div class='hits'>";
-    for (const hit of results) {
+    for (const hit of sortedResults()) {
       const faceId = Number(hit.face_id);
       const label = desiredLabel(faceId);
       const pct = Math.max(0, Math.min(100, Number(hit.score) * 100));
       html += "<div class='hit' data-face='" + esc(faceId) + "' data-img='" + esc(hit.sha256) + "'>" +
         "<a class='hit-media' href='/v1/images/" + esc(hit.sha256) +
-        "' target='_blank' rel='noopener' title='hover to zoom · open full image'><img class='loading' alt='matched face' decoding='async'></a><div>" +
+        "' target='_blank' rel='noopener' title='hover to zoom · open full image'><img class='loading' alt='matched face' decoding='async'>" + dimLabel(hit) + "</a><div>" +
         "<span class='v'>" + Number(hit.score).toFixed(3) + "</span>  img " + esc(hit.image_id) +
         "  face " + esc(faceId) +
         (hit.identity_id !== null && hit.identity_id !== undefined
@@ -1769,6 +1842,9 @@
       }
     }
     bindOpen(out, ".hit .id");
+    for (const button of out.querySelectorAll("[data-sort]")) {
+      button.addEventListener("click", () => setResultSort(button.dataset.sort));
+    }
   }
 
   async function processReference(ref) {

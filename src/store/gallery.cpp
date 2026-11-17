@@ -562,6 +562,8 @@ Hit Gallery::hydrate_one(uint64_t row, float score, bool& ok, bool include_hidde
   h.face_id = static_cast<int64_t>(s.face_id);
   h.image_id = static_cast<int64_t>(s.image_id);
   std::memcpy(h.sha256.data(), image.sha256, h.sha256.size());
+  h.width = static_cast<int>(image.width);
+  h.height = static_cast<int>(image.height);
   h.row = static_cast<int64_t>(row);
   h.score = score;
   h.box = {s.x1, s.y1, s.x2, s.y2};

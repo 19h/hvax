@@ -97,6 +97,8 @@ struct Hit {
   int64_t face_id = 0;
   int64_t image_id = 0;
   std::array<uint8_t, 32> sha256{};
+  int width = 0;  // of the image the face is in
+  int height = 0;
   int64_t row = 0;
   float score = 0;
   BBox box;

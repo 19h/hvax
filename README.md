@@ -424,8 +424,10 @@ Or send JSON with one `embedding` field whose value is an array of exactly 512
 numbers.
 
 Input embeddings are L2-normalized by the server. Hits are sorted by descending
-cosine similarity and include `face_id`, `image_id`, `sha256`, `score`, `bbox`, and
-`det_score`.
+cosine similarity and include `face_id`, `image_id`, `sha256`, `score`, `bbox`,
+`det_score`, and the `width` and `height` of the image the face is in. The
+browser UI shows that size on every thumbnail that links to a full image and
+can reorder the matches by resolution instead of score.
 
 For batch search, concatenate `N` raw embeddings and use
 `POST /v1/query/embedding/batch`. hvax infers `N` from the body length, or you
@@ -499,7 +501,7 @@ queries accept `X-K` values up to 256.
 | `GET` | `/v1/faces/:id/crop?size=160&pad=0.3` | JPEG crop of a face from its master image |
 | `GET` | `/v1/identities?sort=size\|recent\|id&offset&limit` | List people (`--identity-browse`) |
 | `GET` | `/v1/identities/:id` | One person with cohesion and top co-occurring people |
-| `GET` | `/v1/identities/:id/faces?sort=score\|time&offset&limit` | Faces of a person with cosine to the centroid |
+| `GET` | `/v1/identities/:id/faces?sort=score\|time&offset&limit` | Faces of a person with cosine to the centroid and their image's `sha256`, `width`, `height` |
 | `GET` | `/v1/identities/:id/cooccurring?limit` | People who share photos with this one |
 | `GET` | `/v1/identities/:id/cooccurring/:other?offset&limit` | The photos two people share, newest first, with each one's faces |
 | `GET` | `/v1/identities/:id/timeline?bucket=hour\|day\|week` | Faces of a person per ingest bucket |

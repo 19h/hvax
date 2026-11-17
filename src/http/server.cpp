@@ -73,6 +73,8 @@ nlohmann::json hit_json(const Hit& h) {
   nlohmann::json j = {{"face_id", h.face_id},
                       {"image_id", h.image_id},
                       {"sha256", to_hex(h.sha256)},
+                      {"width", h.width},
+                      {"height", h.height},
                       {"score", h.score},
                       {"bbox", bbox_json(h.box)},
                       {"det_score", h.det_score},
@@ -1224,7 +1226,10 @@ void register_routes(Engine& engine, httplib::Server& svr) {
       auto j = face_json(faces[i]);
       j["score"] = scores[i];
       try {
-        j["sha256"] = to_hex(engine.get_image(faces[i].image_id).sha256);
+        const auto im = engine.get_image(faces[i].image_id);
+        j["sha256"] = to_hex(im.sha256);
+        j["width"] = im.width;
+        j["height"] = im.height;
       } catch (...) {
       }
       arr.push_back(j);
